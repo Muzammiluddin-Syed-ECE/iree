@@ -45,7 +45,7 @@ public:
     IREE::GPU::TargetAttr target = getGPUTargetAttr(funcOp);
     StringRef targetArch = target.getArch();
     auto maybeChipset = amdgpu::Chipset::parse(targetArch);
-    if (succeeded(maybeChipset)) {
+    if (succeeded(maybeChipset) && forROCDL) {
       populateGpuLowerSubgroupReduceToDPPPatterns(
           patterns, *subgroupSize, *maybeChipset, PatternBenefit(2));
       populateGpuLowerClusteredSubgroupReduceToDPPPatterns(
