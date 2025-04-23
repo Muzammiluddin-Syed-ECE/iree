@@ -11,6 +11,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "iree/compiler/Codegen/Utils/ReductionUtils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
@@ -461,14 +462,25 @@ static Value warpReduction(Location loc, OpBuilder &builder, Value input,
   // reductions.
   Value laneVal = input;
   // Parallel reduction using butterfly shuffles.
-  for (uint64_t i = 1; i < numLaneToReduce; i <<= 1) {
-    Value shuffled = builder
-                         .create<gpu::ShuffleOp>(loc, pack(laneVal), i,
-                                                 /*width=*/warpSize,
-                                                 /*mode=*/gpu::ShuffleMode::XOR)
-                         .getShuffleResult();
-    laneVal = makeArithReduction(builder, loc, kind, laneVal, unpack(shuffled));
+  auto op =  input.getDefiningOp();
+  FunctionOpInterface funcOp = op->getParentOfType<FunctionOpInterface>();
+  IREE::GPU::TargetAttr target = getGPUTargetAttr(funcOp);
+  StringRef targetArch = target.getArch();
+  auto maybeChipset = amdgpu::Chipset::parse(targetArch);
+  if (succeeded(maybeChipset)) {
+    laneVal = createSubgroupDPPReduction(rewriter, gpu::SubgroupReduceOp op, Value input,
+      gpu::AllReduceOperation mode, const ClusterInfo &ci,
+      amdgpu::Chipset chipset, function_ref<Value(Value)> packFn,
+      function_ref<Value(Value)> unpackFn)
   }
+  // for (uint64_t i = 1; i < numLaneToReduce; i <<= 1) {
+  //   Value shuffled = builder
+  //                        .create<gpu::ShuffleOp>(loc, pack(laneVal), i,
+  //                                                /*width=*/warpSize,
+  //                                                /*mode=*/gpu::ShuffleMode::XOR)
+  //                        .getShuffleResult();
+  //   laneVal = makeArithReduction(builder, loc, kind, laneVal, unpack(shuffled));
+  // }
   // Broadcast the result to all the lanes.
   if (warpSize != numLaneToReduce) {
     Value shuffled = builder

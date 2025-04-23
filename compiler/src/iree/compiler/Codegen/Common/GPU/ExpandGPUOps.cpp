@@ -47,9 +47,11 @@ public:
     auto maybeChipset = amdgpu::Chipset::parse(targetArch);
     if (succeeded(maybeChipset) && forROCDL) {
       populateGpuLowerSubgroupReduceToDPPPatterns(
-          patterns, *subgroupSize, *maybeChipset, PatternBenefit(2));
+          patterns, *subgroupSize, /* shuffleBitwidth=*/32, *maybeChipset,
+          PatternBenefit(2));
       populateGpuLowerClusteredSubgroupReduceToDPPPatterns(
-          patterns, *subgroupSize, *maybeChipset, PatternBenefit(2));
+          patterns, *subgroupSize, /* shuffleBitwidth=*/32, *maybeChipset,
+          PatternBenefit(2));
     }
 
     populateGpuBreakDownSubgroupReducePatterns(
