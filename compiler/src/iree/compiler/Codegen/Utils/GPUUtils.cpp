@@ -468,19 +468,21 @@ static Value warpReduction(Location loc, OpBuilder &builder, Value input,
   StringRef targetArch = target.getArch();
   auto maybeChipset = amdgpu::Chipset::parse(targetArch);
   if (succeeded(maybeChipset)) {
-    laneVal = createSubgroupDPPReduction(rewriter, gpu::SubgroupReduceOp op, Value input,
-      gpu::AllReduceOperation mode, const ClusterInfo &ci,
+    laneVal = createSubgroupDPPReduction(rewriter, op, input, convertReductionMode(kind), const ClusterInfo &ci,
       amdgpu::Chipset chipset, function_ref<Value(Value)> packFn,
-      function_ref<Value(Value)> unpackFn)
+      function_ref<Value(Value)> unpackFn);
+  } else {
+    for (uint64_t i = 1; i < numLaneToReduce; i <<= 1) {
+      Value shuffled =
+          builder
+              .create<gpu::ShuffleOp>(loc, pack(laneVal), i,
+                                      /*width=*/warpSize,
+                                      /*mode=*/gpu::ShuffleMode::XOR)
+              .getShuffleResult();
+      laneVal =
+          makeArithReduction(builder, loc, kind, laneVal, unpack(shuffled));
+    }
   }
-  // for (uint64_t i = 1; i < numLaneToReduce; i <<= 1) {
-  //   Value shuffled = builder
-  //                        .create<gpu::ShuffleOp>(loc, pack(laneVal), i,
-  //                                                /*width=*/warpSize,
-  //                                                /*mode=*/gpu::ShuffleMode::XOR)
-  //                        .getShuffleResult();
-  //   laneVal = makeArithReduction(builder, loc, kind, laneVal, unpack(shuffled));
-  // }
   // Broadcast the result to all the lanes.
   if (warpSize != numLaneToReduce) {
     Value shuffled = builder
