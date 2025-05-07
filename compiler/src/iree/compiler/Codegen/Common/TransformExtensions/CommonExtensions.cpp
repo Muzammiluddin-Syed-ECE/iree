@@ -968,6 +968,7 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
       return addressSpaceAttr;
     };
   }
+  llvm::errs() << "adad 1\n";
   if (failed(runIREEOneShotBufferize(target, options))) {
     return mlir::emitDefiniteFailure(target, "bufferization failed");
   }

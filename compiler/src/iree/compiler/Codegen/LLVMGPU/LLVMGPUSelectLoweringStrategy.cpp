@@ -88,12 +88,16 @@ verifyEntryPoint(FunctionOpInterface funcOp,
 void LLVMGPUSelectLoweringStrategyPass::runOnOperation() {
   auto moduleOp = getOperation();
   for (auto funcOp : moduleOp.getOps<FunctionOpInterface>()) {
+    IREE::Codegen::TranslationInfoAttr translationInfo2 =
+        getTranslationInfo(funcOp);
+    llvm::errs() << "DEBUG[1] - " << translationInfo2 << "\n";
     if (failed(initGPULaunchConfig(funcOp))) {
       return signalPassFailure();
     }
 
     IREE::Codegen::TranslationInfoAttr translationInfo =
         getTranslationInfo(funcOp);
+    llvm::errs() << "DEBUG[0] - " << translationInfo << "\n";
     if (!translationInfo) {
       // Dont do anything if translation info is not set.
       return;

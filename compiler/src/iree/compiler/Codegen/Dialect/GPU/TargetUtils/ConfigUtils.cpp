@@ -127,6 +127,7 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
     IREE::GPU::TargetAttr target, GPUMatmulShapeType problem,
     bool transposedLhs, bool transposedRhs, bool mustBeAligned = true,
     bool doCPromotion = false) {
+  llvm::errs() << "[DEBUG] "<< "1" << "\n";
   const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
   SmallVector<GPUMatmulShapeType> intrinsics;
   for (IREE::GPU::MMAAttr mma : target.getWgp().getMma()) {
@@ -188,6 +189,10 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
                                         ArrayRef<AffineMap> maps,
                                         ArrayRef<Value> operands,
                                         IREE::GPU::TargetAttr target) {
+  
+  for (int64_t bound : bounds) {
+    llvm::errs() << "[DEBUG][bounds] - " << bound << "\n";
+  }  
   if (target.getWgp().getMma().empty())
     return failure();
 
@@ -274,6 +279,7 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
 
   bool mustBeAligned = true;
   bool doCPromotion = false;
+  llvm::errs() << "[DEBUG] "<< "2" << "\n";
   std::optional<GPUMMASchedule> schedule = getMmaScheduleFromProblemAndTarget(
       target, problem, transposedLhs, transposedRhs);
 
@@ -285,6 +291,7 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
     LDBG("Attempting to deduce unaligned TileAndFuse MMA schedulee");
     mustBeAligned = false;
     doCPromotion = true;
+    llvm::errs() << "[DEBUG] "<< "3" << "\n";
     schedule = getMmaScheduleFromProblemAndTarget(target, problem,
                                                   transposedLhs, transposedRhs,
                                                   mustBeAligned, doCPromotion);
@@ -1023,6 +1030,9 @@ LogicalResult setSortConfig(IREE::GPU::TargetAttr target,
   SmallVector<unsigned> partitionedLoops =
       interfaceOp.getPartitionableLoops(std::nullopt);
 
+  for (auto loop : partitionedLoops) {
+    llvm::errs() << "[DEBUG][partitionedLoops] " << loop << "\n";
+  }
   auto createLoweringConfig = [&](ArrayRef<int64_t> workgroupSizes,
                                   ArrayRef<int64_t> threadSizes) {
     NamedAttribute attrs[2] = {
@@ -1044,7 +1054,7 @@ LogicalResult setSortConfig(IREE::GPU::TargetAttr target,
   unsigned numLoops = cast<ShapedType>(op->getResult(0).getType()).getRank();
 
   // To get peak occupancy we need a workgroup size of at least two warps.
-  std::array<int64_t, 3> workgroupSize = {2 * subgroupSize, 1, 1};
+  std::array<int64_t, 3> workgroupSize = {1, 1, 1};
   SmallVector<int64_t> workgroupTileSizes(numLoops, 1);
   SmallVector<int64_t> threadTileSizes(numLoops, 1);
 
@@ -1060,6 +1070,15 @@ LogicalResult setSortConfig(IREE::GPU::TargetAttr target,
 
   // Tile to have one element per thread.
   ArrayRef loopBounds = cast<IREE::LinalgExt::SortOp>(op).getOperandShape();
+  for (long loop : loopBounds) {
+    llvm::errs() << "[DEBUG][loopBounds] " << loop << "\n";
+  }
+  for (auto loop : workgroupTileSizes) {
+    llvm::errs() << "[DEBUG][workgroupTileSizes] " << loop << "\n";
+  }
+  for (auto loop : threadTileSizes) {
+    llvm::errs() << "[DEBUG][threadTileSizes] " << loop << "\n";
+  }
   int64_t residualWorkgroupSize = workgroupSize[0];
   for (int64_t depth = numLoops - 1; depth >= 0; --depth) {
     if (!partitionedLoopsSet.contains(depth)) {
@@ -1078,7 +1097,15 @@ LogicalResult setSortConfig(IREE::GPU::TargetAttr target,
       break;
     }
   }
-
+  for (long loop : loopBounds) {
+    llvm::errs() << "[DEBUG][loopBounds] " << loop << "\n";
+  }
+  for (auto loop : workgroupTileSizes) {
+    llvm::errs() << "[DEBUG][workgroupTileSizes] " << loop << "\n";
+  }
+  for (auto loop : threadTileSizes) {
+    llvm::errs() << "[DEBUG][threadTileSizes] " << loop << "\n";
+  }
   IREE::GPU::LoweringConfigAttr loweringConfig =
       createLoweringConfig(workgroupTileSizes, threadTileSizes);
   return setOpConfigAndEntryPointFnTranslation(

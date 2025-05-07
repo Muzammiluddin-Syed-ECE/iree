@@ -2190,50 +2190,6 @@ static LogicalResult setWinogradOpConfig(IREE::GPU::TargetAttr target,
 }
 
 //====---------------------------------------------------------------------===//
-// Sort Pipeline Configuration
-//====---------------------------------------------------------------------===//
-
-static LogicalResult setSortConfig(IREE::GPU::TargetAttr target,
-                                   mlir::FunctionOpInterface entryPoint,
-                                   Operation *op) {
-  TileSizesListType tileSizes;
-  auto interfaceOp = cast<PartitionableLoopsInterface>(*op);
-  auto partitionedLoops =
-      interfaceOp.getPartitionableLoops(kNumMaxParallelDims);
-  if (partitionedLoops.empty()) {
-    tileSizes.push_back({});
-    return setOpConfigAndEntryPointFnTranslation(
-        entryPoint, op, tileSizes, CodeGenPipeline::LLVMGPUDistribute,
-        {1, 1, 1});
-  }
-  size_t numLoops = partitionedLoops.back() + 1;
-  // To get peak occupancy we need a workgroup size of at least two warps
-  std::array<int64_t, 3> workgroupSize = {2 * target.getPreferredSubgroupSize(),
-                                          1, 1};
-  SmallVector<int64_t> workgroupTileSizes(numLoops, 1);
-  // Set all non-parallel loops to zero tile size.
-  llvm::DenseSet<unsigned> partitionedLoopsSet(partitionedLoops.begin(),
-                                               partitionedLoops.end());
-  for (auto depth : llvm::seq<int64_t>(0, numLoops)) {
-    if (!partitionedLoopsSet.count(depth)) {
-      workgroupTileSizes[depth] = 0;
-    }
-  }
-
-  // Tile to have one element per thread.
-  for (int64_t depth = numLoops; depth > 0; depth--) {
-    if (partitionedLoopsSet.count(depth - 1)) {
-      workgroupTileSizes[depth - 1] = workgroupSize[0];
-      break;
-    }
-  }
-  tileSizes.emplace_back(std::move(workgroupTileSizes)); // Workgroup level
-  return setOpConfigAndEntryPointFnTranslation(
-      entryPoint, op, tileSizes, CodeGenPipeline::LLVMGPUDistribute,
-      workgroupSize);
-}
-
-//====---------------------------------------------------------------------===//
 // Default Pipeline Configuration
 //====---------------------------------------------------------------------===//
 
@@ -2940,6 +2896,7 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
                                    mlir::FunctionOpInterface entryPointFn,
                                    Operation *computeOp) {
   IREE::GPU::UKernelConfigAttr ukernelConfig = selectUKernel(computeOp);
+  llvm::errs() << "DEBUG[4.3A] - CHECKPOINT 1\n";
   LLVM_DEBUG({
     DBGS() << "Selecting root config for: ";
     computeOp->print(llvm::dbgs(), OpPrintingFlags().skipRegions());
@@ -3013,6 +2970,8 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
       return success();
     }
   }
+  auto temp = getTranslationInfo(entryPointFn);
+  llvm::errs() << "DEBUG[4.3] - " <<  temp << " \n";
   return TypeSwitch<Operation *, LogicalResult>(computeOp)
       .Case<IREE::LinalgExt::FftOp>([&](auto fftOp) {
         LDBG("FFT Config");
@@ -3020,7 +2979,10 @@ static LogicalResult setRootConfig(IREE::GPU::TargetAttr target,
       })
       .Case<IREE::LinalgExt::SortOp>([&](auto sortOp) {
         LDBG("Sort Config");
-        return IREE::GPU::setSortConfig(target, entryPointFn, sortOp);
+        auto res = IREE::GPU::setSortConfig(target, entryPointFn, sortOp);
+        auto temp = getTranslationInfo(entryPointFn);
+        llvm::errs() << "DEBUG[4.4] - " <<  temp << " \n";
+        return res;
       })
       .Case<IREE::LinalgExt::WinogradInputTransformOp,
             IREE::LinalgExt::WinogradOutputTransformOp,
@@ -3087,7 +3049,9 @@ LogicalResult initGPULaunchConfig(FunctionOpInterface funcOp) {
     // workgroup count set--it's a "contract" to indicate that we should
     // bypass all tiling and distribution to go down just the most basic
     // lowering flow.
+    llvm::errs() << "DEBUG[2] - !getTranslationInfo(funcOp) && exportOp\n";
     if (Block *body = exportOp->getWorkgroupCountBody()) {
+      llvm::errs() << "DEBUG[3] - exportOp->getWorkgroupCountBody()\n";
       auto retOp = cast<IREE::HAL::ReturnOp>(body->getTerminator());
       // For scalar dispatch cases--using just one thread of one workgroup.
       auto isOne = [](Value value) { return matchPattern(value, m_One()); };
@@ -3107,6 +3071,7 @@ LogicalResult initGPULaunchConfig(FunctionOpInterface funcOp) {
   SmallVector<Operation *> computeOps = getComputeOps(funcOp);
   if (IREE::Codegen::TranslationInfoAttr translationInfo =
           getTranslationInfo(funcOp)) {
+    llvm::errs() << "DEBUG[4] - already set somehow\n";
     // Currently some ROCDL requires propagation of user lowering configs.
     if (needsLoweringConfigPropagation(
             translationInfo.getDispatchLoweringPassPipeline())) {
@@ -3122,7 +3087,8 @@ LogicalResult initGPULaunchConfig(FunctionOpInterface funcOp) {
   }
 
   Operation *rootOperation = nullptr;
-
+  IREE::Codegen::TranslationInfoAttr temp = getTranslationInfo(funcOp);
+  llvm::errs() << "DEBUG[4.1] - " <<  temp << " \n";
   // Find the root operation. linalg.generic, linalg.fill, linalg.pack,
   // linalg.unpack, and scatter are not root operations if there are other
   // compute operations present. Also, construct a set of generic ops that
@@ -3197,12 +3163,17 @@ LogicalResult initGPULaunchConfig(FunctionOpInterface funcOp) {
     }
     return success();
   }
+  temp = getTranslationInfo(funcOp);
+  llvm::errs() << "DEBUG[4.2] - " <<  temp << " \n";
 
   if (failed(setRootConfig(target, funcOp, rootOperation)))
     return funcOp.emitOpError("failed to set root config");
 
+  llvm::errs() << "DEBUG[5] - ", rootOperation->print(llvm::errs()), llvm::errs() << " \n";
+
   if (IREE::Codegen::TranslationInfoAttr translationInfo =
           getTranslationInfo(funcOp)) {
+    llvm::errs() << "DEBUG[6] - " <<  translationInfo << " \n";
     // Currently some ROCDL requires propagation of user lowering configs.
     if (!needsLoweringConfigPropagation(
             translationInfo.getDispatchLoweringPassPipeline())) {

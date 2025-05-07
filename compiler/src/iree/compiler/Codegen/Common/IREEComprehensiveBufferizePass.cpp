@@ -220,6 +220,7 @@ void EliminateEmptyTensorsPass::runOnOperation() {
 LogicalResult
 runIREEOneShotBufferize(Operation *op,
                         const IREEOneShotBufferizationOptions &options) {
+  llvm::errs() << "acac 1\n";
   OneShotAnalysisState state(op, options);
   if (failed(analyzeOp(op, state)))
     return failure();
@@ -241,7 +242,7 @@ void IREEComprehensiveBufferizePass::runOnOperation() {
   // conditions. Turning this option off could be a good step in diagnosing
   // data races on GPU.
   options.checkParallelRegions = false;
-
+  llvm::errs() << "adad 2\n";
   if (failed(runIREEOneShotBufferize(funcOp, options))) {
     return signalPassFailure();
   }
@@ -257,6 +258,7 @@ void IREEComprehensiveBufferizePass::runOnOperation() {
 }
 
 void IREEBufferizeConstantsPass::runOnOperation() {
+  llvm::errs() << "acac 2\n";
   mlir::bufferization::OneShotBufferizationOptions opt;
   opt.copyBeforeWrite = true;
   opt.opFilter.allowOperation(arith::ConstantOp::getOperationName());
