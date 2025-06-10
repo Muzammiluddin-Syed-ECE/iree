@@ -968,8 +968,7 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createCSEPass());
 }
 
-void addGPUWarpReductionPassPipeline(OpPassManager &funcPassManager,
-                                     bool forROCDL) {
+void addGPUWarpReductionPassPipeline(OpPassManager &funcPassManager) {
   tileAndDistributeToWorkgroup(
       funcPassManager, /*useForall=*/clDistributeToWorkgroupsUsingForall);
   funcPassManager.addPass(createRematerializeParallelOpsPass());
@@ -1009,9 +1008,8 @@ void addGPUWarpReductionPassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createCanonicalizerPass());
 
   // vector -> simt gpu + vector
-  VectorReductionToGPUPassOptions options;
-  options.expandSubgroupReduction = !forROCDL;
-  funcPassManager.addPass(createVectorReductionToGPUPass(options));
+  funcPassManager.addPass(createConvertVectorReductionToGPUPass(
+      /*expandSubgroupReduction=*/true));
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
   funcPassManager.addPass(affine::createLoopCoalescingPass());
@@ -1156,7 +1154,7 @@ static void addLowerToLLVMGPUPasses(OpPassManager &modulePassManager,
 
   // Run checks on shared memory usage.
   funcPassManager
-      .addPass([&] {
+      .addPass([&]() {
         auto getIndexBitwidth = [](mlir::FunctionOpInterface) { return 64; };
         return createGPUCheckResourceUsagePass(getIndexBitwidth);
       })
@@ -1252,11 +1250,8 @@ void buildLLVMGPUCodegenPassPipeline(OpPassManager &variantPassManager,
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
-    LLVMGPULowerExecutableTargetPassOptions options;
-    options.forROCDL = useROCM;
     FunctionLikeNest(modulePassManager)
-        .addPass(
-            [&] { return createLLVMGPULowerExecutableTargetPass(options); })
+        .addPass(createLLVMGPULowerExecutableTargetPass)
         .addPass(createVerifyWorkgroupDistributionPass);
   }
   {

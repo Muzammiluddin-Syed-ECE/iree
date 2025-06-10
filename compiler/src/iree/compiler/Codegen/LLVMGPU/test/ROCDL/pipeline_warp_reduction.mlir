@@ -35,7 +35,7 @@ hal.executable private @warp_reduction {
 }
 
 //   CHECK-LABEL: llvm.func @warp_reduction
-// CHECK-COUNT-6:   rocdl.update.dpp
+// CHECK-COUNT-8:   rocdl.ds_{{swizzle|bpermute}}
 
 // -----
 
@@ -72,10 +72,8 @@ hal.executable public @main_dispatch_517 {
 }
 
 // Each workgroup (5x64 threads) handles a shape of 64x1280 (parallel x reduction).
-// So we are seeing:
-// 6 dpp ops to reduce within warps
-// => 64 * (6) = 384 dpp operations.
+// So we are seeing 64x(5x2) = 640 warp operations.
 // TODO: we probably need to revisit the configuration heuristics here.
 
 //     CHECK-LABEL: llvm.func @warp_reduction_large_vector
-// CHECK-COUNT-384:   rocdl.update.dpp
+// CHECK-COUNT-640:   rocdl.ds_{{swizzle|bpermute}}

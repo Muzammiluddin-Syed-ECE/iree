@@ -74,11 +74,6 @@ def LLVMGPULinkExecutablesPass :
 def LLVMGPULowerExecutableTargetPass :
     InterfacePass<"iree-llvmgpu-lower-executable-target", "mlir::FunctionOpInterface"> {
   let summary = "Perform lowering of executable target using one of the IREE::HAL::DispatchLoweringPassPipeline";
-  let options = [
-    Option<"forROCDL", "for-rocdl", "bool",
-           /*default=*/"false",
-           "Enable features only supported on ROCDL such as delaying lowering of subgroup reduce.">,
-  ];
 }
 
 def LLVMGPUPackSharedMemoryAllocPass :
