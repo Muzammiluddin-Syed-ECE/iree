@@ -36,6 +36,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
   os << "mSizes: " << schedule.mSize << ", ";
   os << "nSizes: " << schedule.nSize << ", ";
   os << "kSizes: " << schedule.kSize << ", ";
+  os << "kBSizes: " << schedule.kBSize << ", ";
   os << "mTileSizes: " << schedule.mTileSizes << ", ";
   os << "nTileSizes: " << schedule.nTileSizes << ", ";
   os << "kTileSizes: " << schedule.kTileSizes << ", ";
@@ -285,10 +286,12 @@ getBestKTileSizes(const GPUMatmulShapeType &problem,
   // 16x16x16 intrinsic, then:
   //  - kTotalTileCounts would be 3 * (128/16) = 24
   SmallVector<int64_t, 2> kTotalTileCounts = problem.kSizes;
-  kTotalTileCounts[1] =
-      llvm::divideCeil(problem.kSizes[1], intrinsic.kSizes[1]);
   kTotalTileCounts[0] =
-      llvm::divideCeil(problem.kSizes[0], intrinsic.mmaKind.getBlockSize());
+      llvm::divideCeil(problem.kSizes[0], intrinsic.kSizes[0]);
+  if (intrinsic.kSizes.size() == 2) {
+    kTotalTileCounts[1] =
+        llvm::divideCeil(problem.kSizes[1], intrinsic.kSizes[1]);
+  }
   // Compute the ideal number of intrinsics along K per subgroup based on the
   // seed.
   int64_t bestKTileCountPerSubgroup =
@@ -296,16 +299,33 @@ getBestKTileSizes(const GPUMatmulShapeType &problem,
           ? llvm::divideCeil(seeds.bestKElementCountPerSubgroup,
                              intrinsic.kSizes[0])
           : seeds.bestKTileCountPerSubgroup;
+
   SmallVector<int64_t> kTileSizes(problem.kSizes.size(), 0);
   // Start at the innermost K dim, and tile each dim to try to satisfy the ideal
   // K intrinsic count per subgroup with the overall product of K tile counts.
-  int kDim = problem.kSizes.size() - 1;
-  while (kDim >= 0) {
+  if (problem.kSizes.size() == 2) {
+    int64_t bestKBTileCountPerSubgroup =
+        seeds.bestKBElementCountPerSubgroup
+            ? llvm::divideCeil(seeds.bestKBElementCountPerSubgroup,
+                               intrinsic.kSizes[1])
+            : seeds.bestKBTileCountPerSubgroup;
+
+    APInt kGCD = GreatestCommonDivisor(APInt(64, kTotalTileCounts[1]),
+                                       APInt(64, bestKBTileCountPerSubgroup));
+    kTileSizes[1] = kGCD.getSExtValue();
+    bestKTileCountPerSubgroup /= kTileSizes[1];
+    kGCD = GreatestCommonDivisor(APInt(64, kTotalTileCounts[0]),
+                                 APInt(64, bestKTileCountPerSubgroup));
+    kTileSizes[0] = kGCD.getSExtValue();
+    return kTileSizes;
+  }
+  int kDim = 0;
+  while (kDim < problem.kSizes.size()) {
     APInt kGCD = GreatestCommonDivisor(APInt(64, kTotalTileCounts[kDim]),
                                        APInt(64, bestKTileCountPerSubgroup));
     kTileSizes[kDim] = kGCD.getSExtValue();
     bestKTileCountPerSubgroup /= kTileSizes[kDim];
-    --kDim;
+    ++kDim;
   }
 
   return kTileSizes;
@@ -407,7 +427,7 @@ static GPUMMASchedule getOptimalMMASchedule(const GPUMatmulShapeType &problem,
       getBestKTileSizes(problem, intrinsic, seeds);
   return GPUMMASchedule{
       intrinsic.mmaKind,   intrinsic.mSizes[0], intrinsic.nSizes[0],
-      intrinsic.kSizes[0], mSubgroupCounts,     nSubgroupCounts,
+      intrinsic.kSizes,    mSubgroupCounts,     nSubgroupCounts,
       mTileSizes,          nTileSizes,          kTileSizes};
 }
 

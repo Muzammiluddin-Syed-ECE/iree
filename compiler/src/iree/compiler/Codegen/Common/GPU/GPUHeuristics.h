@@ -49,10 +49,13 @@ struct GPUMMAHeuristicSeeds {
   int64_t bestMNTileCountPerSubgroup;
   // The best number of tiles along K dimension per subgroup
   int64_t bestKTileCountPerSubgroup;
+  int64_t bestKBTileCountPerSubgroup;
+  
   // The best number of elements along K dimension per subgroup. This is
   // equivalent to `bestKTileCountPerSubgroup * bestIntrinsic.kSize`, for
   // some chosen intrinsic `bestIntrinsic`.
   int64_t bestKElementCountPerSubgroup = 0;
+  int64_t bestKBElementCountPerSubgroup = 0;
 };
 
 struct GPUMMASchedule {
@@ -61,6 +64,7 @@ struct GPUMMASchedule {
   int64_t mSize; // Native MMA intrinsic size along M dimension for a subgroup.
   int64_t nSize; // Native MMA intrinsic size along N dimension for a subgroup.
   int64_t kSize; // Native MMA intrinsic size along K dimension for a subgroup.
+  int64_t kBSize; // Native MMA intrinsic size along KB dimension for a subgroup.
 
   // Number of subgroups along each M and N dimension.
   SmallVector<int64_t> mSubgroupCounts;
@@ -96,6 +100,20 @@ struct GPUMMASchedule {
         kSize(kIntrinsicSize), mSubgroupCounts({mSubgroup}),
         nSubgroupCounts({nSubgroup}), mTileSizes({mTileSize}),
         nTileSizes({nTileSize}), kTileSizes({kTileSize}) {}
+
+  // Constructor for single M, N, K dim schedules.
+  GPUMMASchedule(IREE::GPU::MmaInterfaceAttr kind, int64_t mIntrinsicSize,
+                 int64_t nIntrinsicSize, SmallVector<int64_t, 2> kIntrinsicSize,
+                 SmallVector<int64_t> mSubgroupCounts,
+                 SmallVector<int64_t> nSubgroupCounts,
+                 SmallVector<int64_t> mTileSizes,
+                 SmallVector<int64_t> nTileSizes,
+                 SmallVector<int64_t> kTileSizes)
+      : mmaKind(kind), mSize(mIntrinsicSize), nSize(nIntrinsicSize),
+        kSize(kIntrinsicSize[0]), kBSize(kIntrinsicSize[1]),
+        mSubgroupCounts(mSubgroupCounts), nSubgroupCounts(nSubgroupCounts),
+        mTileSizes(mTileSizes), nTileSizes(nTileSizes), kTileSizes(kTileSizes) {
+  }
 };
 
 /// Returns a schedule for using one of the given MMA |intrinsics| to target the

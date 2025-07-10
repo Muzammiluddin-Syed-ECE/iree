@@ -939,11 +939,11 @@ convertScaledContractionToInnerTiledMma(RewriterBase &rewriter,
 
   // TODO: Enable batched intrinsics and get the appropriate sub-map here.
   SmallVector<int64_t> lhsInnerPerm = getNormalizedPermutation(
-      lhsMap.getMinorSubMap(3), {mExpr, kBExpr, kExpr});
+      lhsMap.getMinorSubMap(3), {mExpr, kExpr, kBExpr});
   SmallVector<int64_t> sc1InnerPerm =
       getNormalizedPermutation(sc1Map.getMinorSubMap(2), {mExpr, kBExpr});
   SmallVector<int64_t> rhsInnerPerm = getNormalizedPermutation(
-      rhsMap.getMinorSubMap(3), {kBExpr, kExpr, nExpr});
+      rhsMap.getMinorSubMap(3), {kExpr, kBExpr, nExpr});
   SmallVector<int64_t> sc2InnerPerm =
       getNormalizedPermutation(sc2Map.getMinorSubMap(2), {nExpr, kBExpr});
   SmallVector<int64_t> accInnerPerm =
@@ -1271,9 +1271,7 @@ distributeInnerTiledOp(RewriterBase &rewriter,
         loc, newResult, extractOp.getSource(), extractOp.getMixedOffsets(),
         extractOp.getMixedSizes(), extractOp.getMixedStrides());
   }
-
   rewriter.replaceOp(tiledOp, newForallOp);
-
   return &*newForallOp;
 }
 

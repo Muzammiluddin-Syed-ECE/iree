@@ -210,13 +210,17 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
     seeds = {/*bestSubgroupCountPerWorkgroup=*/4,
              /*bestMNTileCountPerSubgroup=*/4,
              /*bestKTileCountPerSubgroup=*/8,
-             /*bestKElementCountPerSubgroup*/ kCacheLineSizeBits / inBitWidth};
+             /*bestKBTileCountPerSubgroup=*/1,
+             /*bestKElementCountPerSubgroup*/ kCacheLineSizeBits / inBitWidth,
+             /*bestKElementCountPerSubgroup*/ 32};
   } else {
     seeds = {/*bestSubgroupCountPerWorkgroup=*/4,
              /*bestMNTileCountPerSubgroup=*/16,
              /*bestKTileCountPerSubgroup=*/4,
+             /*bestKBTileCountPerSubgroup=*/1,
              /*bestKElementCountPerSubgroup*/ kCacheLineSizeBits / 2 /
-                 inBitWidth};
+                 inBitWidth,
+             /*bestKElementCountPerSubgroup*/32};
   }
   int64_t maxSharedMemoryBytes = target.getWgp().getMaxWorkgroupMemoryBytes();
 
@@ -246,7 +250,7 @@ static std::optional<GPUMMASchedule> getScaledMmaScheduleFromProblemAndTarget(
     auto [m, n, k, kB] = smma.getScaledMNKShape();
     SmallVector<Type> elementTypes;
     smma.getElementTypes(elementTypes);
-    intrinsics.emplace_back(GPUIntrinsicType({m}, {n}, {kB, k}, {},
+    intrinsics.emplace_back(GPUIntrinsicType({m}, {n}, {k, kB}, {},
                                              elementTypes[0], elementTypes[2],
                                              elementTypes[4], smma));
   }
@@ -268,14 +272,18 @@ static std::optional<GPUMMASchedule> getScaledMmaScheduleFromProblemAndTarget(
     // and a larger bestKTileCountPerSubgroup.
     seeds = {/*bestSubgroupCountPerWorkgroup=*/4,
              /*bestMNTileCountPerSubgroup=*/4,
-             /*bestKTileCountPerSubgroup=*/8,
-             /*bestKElementCountPerSubgroup*/ kCacheLineSizeBits / inBitWidth};
+             /*bestKTileCountPerSubgroup=*/1,
+             /*bestKBTileCountPerSubgroup=*/1,
+             /*bestKElementCountPerSubgroup*/ kCacheLineSizeBits / inBitWidth,
+             /*bestKElementCountPerSubgroup*/ 32};
   } else {
     seeds = {/*bestSubgroupCountPerWorkgroup=*/4,
              /*bestMNTileCountPerSubgroup=*/16,
-             /*bestKTileCountPerSubgroup=*/4,
+             /*bestKTileCountPerSubgroup=*/1,
+             /*bestKBTileCountPerSubgroup=*/1,
              /*bestKElementCountPerSubgroup*/ kCacheLineSizeBits / 2 /
-                 inBitWidth};
+                 inBitWidth,
+             /*bestKElementCountPerSubgroup*/32};
   }
   int64_t maxSharedMemoryBytes = target.getWgp().getMaxWorkgroupMemoryBytes();
 
@@ -564,19 +572,19 @@ getScaledMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
     }
     nDims.push_back(nDim);
   }
-  for (int64_t kBDim : contractionKB) {
-    if (ShapedType::isDynamic(bounds[kBDim])) {
-      canSupportUnaligned = false;
-      continue;
-    }
-    kDims.push_back(kBDim);
-  }
   for (int64_t kDim : contractionK) {
     if (ShapedType::isDynamic(bounds[kDim])) {
       canSupportUnaligned = false;
       continue;
     }
     kDims.push_back(kDim);
+  }
+  for (int64_t kBDim : contractionKB) {
+    if (ShapedType::isDynamic(bounds[kBDim])) {
+      canSupportUnaligned = false;
+      continue;
+    }
+    kDims.push_back(kBDim);
   }
   for (int64_t batchDim : contractionB) {
     if (ShapedType::isDynamic(bounds[batchDim])) {
@@ -658,6 +666,9 @@ getScaledMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
     workgroupTileSizes[n] = 1;
   }
   for (int64_t k : llvm::drop_end(contractionK)) {
+    reductionTileSizes[k] = 1;
+  }
+  for (int64_t k : llvm::drop_end(contractionKB)) {
     reductionTileSizes[k] = 1;
   }
 
