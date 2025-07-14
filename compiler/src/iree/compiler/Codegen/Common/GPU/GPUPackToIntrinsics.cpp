@@ -34,7 +34,7 @@ struct GPUPackToIntrinsicsPass final
 
 FailureOr<SmallVector<OpFoldResult>>
 getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
-               IREE::GPU::MmaInterfaceAttr kind) {
+               IREE::Codegen::InnerTileDescAttrInterface kind) {
   SmallVector<int64_t> dims;
   SmallVector<SmallVector<unsigned, 2>> indices;
   auto createPackedSizes =
@@ -79,7 +79,7 @@ LogicalResult packToIntrinsic(linalg::LinalgOp linalgOp,
   auto loweringConfig =
       getLoweringConfig<IREE::GPU::LoweringConfigAttr>(linalgOp);
   assert(loweringConfig && "Packing unconfigured op");
-  IREE::GPU::MmaInterfaceAttr kind = getMmaKind(loweringConfig);
+  IREE::Codegen::InnerTileDescAttrInterface kind = getMmaKind(loweringConfig);
   assert(kind && "Packing op without mma kind");
   FailureOr<SmallVector<OpFoldResult>> packedSizes =
       getPackedSizes(linalgOp, rewriter, kind);
@@ -101,7 +101,7 @@ struct ConvertToMultiMma final : OpInterfaceRewritePattern<linalg::LinalgOp> {
     if (!loweringConfig) {
       return failure();
     }
-    IREE::GPU::MmaInterfaceAttr kind = getMmaKind(loweringConfig);
+    IREE::Codegen::InnerTileDescAttrInterface kind = getMmaKind(loweringConfig);
     if (!kind) {
       return failure();
     }

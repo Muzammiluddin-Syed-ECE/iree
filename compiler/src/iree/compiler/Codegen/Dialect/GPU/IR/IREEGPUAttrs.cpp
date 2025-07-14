@@ -491,7 +491,7 @@ static OpaqueMmaLayout getOpaqueMMALayout(MLIRContext *context,
   return o;
 }
 
-MMASingleSubgroupLayout getSingleSubgroupLayout(MmaInterfaceAttr mmaKind,
+MMASingleSubgroupLayout getSingleSubgroupLayout(IREE::Codegen::InnerTileDescAttrInterface mmaKind,
                                                 MMAFragment fragment) {
   if (auto mmaAttr = dyn_cast<MMAAttr>(mmaKind)) {
     // |colMajor| indicates that the accumulator layout should be returned
