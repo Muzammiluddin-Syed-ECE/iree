@@ -222,6 +222,7 @@ struct ConvertToROCDLPass final
     // Run Vector -> Vector transformations ahead of conversion to LLVM.
     {
       RewritePatternSet patterns(&getContext());
+      RewritePatternSet maybePatterns(&getContext());
       auto options =
           vector::VectorTransformsOptions().setVectorTransformsOptions(
               vector::VectorContractLowering::OuterProduct);
@@ -242,7 +243,8 @@ struct ConvertToROCDLPass final
       if (allTypesValid.wasInterrupted()) {
         return signalPassFailure();
       }
-
+      arith::populateExpandF8E8M0Patterns(maybePatterns);
+      arith::populateExpandF4E2M1Patterns(maybePatterns);
       arith::populateArithToAMDGPUConversionPatterns(
           patterns, /*convertFP8Arithmetic=*/true, /*saturateFP8Truncf=*/false,
           /*allowPackedF16Rtz=*/false, /*chipset=*/*maybeChipset);
@@ -274,6 +276,9 @@ struct ConvertToROCDLPass final
       arith::populateExpandBFloat16Patterns(patterns);
       if (failed(applyPatternsGreedily(m, std::move(patterns)))) {
         return signalPassFailure();
+      }
+      if (failed(applyPartialConversion(m, target, std::move(maybePatterns)))) {
+        signalPassFailure();
       }
     }
 
@@ -335,8 +340,6 @@ struct ConvertToROCDLPass final
       configureGpuToROCDLConversionLegality(target);
       populateMathToROCDLConversionPatterns(converter, llvmPatterns);
       ub::populateUBToLLVMConversionPatterns(converter, llvmPatterns);
-      arith::populateExpandF8E8M0Patterns(llvmPatterns);
-      arith::populateExpandF4E2M1Patterns(llvmPatterns);
 
       if (failed(applyPartialConversion(m, target, std::move(llvmPatterns))))
         signalPassFailure();
