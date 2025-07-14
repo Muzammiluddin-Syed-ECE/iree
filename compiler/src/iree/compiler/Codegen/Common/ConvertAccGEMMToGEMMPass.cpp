@@ -31,8 +31,7 @@ namespace mlir::iree_compiler {
 
 static bool accGemmToGemmPrecondition(Operation *op) {
   if (auto innerTiledOp = dyn_cast<IREE::Codegen::InnerTiledOp>(op)) {
-    return isa<IREE::Codegen::InnerTileDescAttrInterface>(
-        innerTiledOp.getKind());
+    return isa<IREE::GPU::MmaInterfaceAttr>(innerTiledOp.getKind());
   }
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp) {

@@ -46,7 +46,7 @@ struct UpcastContractOutput final : OpRewritePattern<vector::ContractionOp> {
     auto srcAType = contractOp.getLhsType();
     auto srcBType = contractOp.getRhsType();
 
-    auto intrinsic = contractOp->getAttrOfType<IREE::Codegen::InnerTileDescAttrInterface>(
+    auto intrinsic = contractOp->getAttrOfType<IREE::GPU::MmaInterfaceAttr>(
         "iree.amdgpu.mma");
     if (!intrinsic) {
       return rewriter.notifyMatchFailure(
