@@ -278,7 +278,7 @@ struct ConvertToROCDLPass final
       if (failed(applyPatternsGreedily(m, std::move(patterns)))) {
         return signalPassFailure();
       }
-      if (failed(applyPartialConversion(m, target, std::move(maybePatterns)))) {
+      if (failed(applyPatternsGreedily(m, std::move(maybePatterns)))) {
         signalPassFailure();
       }
     }

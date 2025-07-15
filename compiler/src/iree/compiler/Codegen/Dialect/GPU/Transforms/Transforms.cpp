@@ -1054,10 +1054,9 @@ getInnerDims(linalg::LinalgOp linalgOp) {
                       maybeContractionDims->k});
 }
 
-FailureOr<IREE::Codegen::InnerTiledOp>
-convertScaledContractionToInnerTiledMma(RewriterBase &rewriter,
-                                        linalg::LinalgOp linalgOp,
-                                        IREE::GPU::MmaInterfaceAttr mmaKind) {
+FailureOr<IREE::Codegen::InnerTiledOp> convertScaledContractionToInnerTiledMma(
+    RewriterBase &rewriter, linalg::LinalgOp linalgOp,
+    IREE::Codegen::InnerTileDescAttrInterface mmaKind) {
   FailureOr<IREE::LinalgExt::ScaledContractionDimensions> contractionDims =
       IREE::LinalgExt::inferScaledContractionDims(linalgOp);
   if (failed(contractionDims)) {
@@ -1203,10 +1202,9 @@ convertScaledContractionToInnerTiledMma(RewriterBase &rewriter,
 
 // Helper to convert a contraction-like linalg op to an iree_codegen.inner_tiled
 // op with a MMA-like intrinsic descriptor.
-FailureOr<IREE::Codegen::InnerTiledOp>
-convertContractionToInnerTiledMma(RewriterBase &rewriter,
-                                  linalg::LinalgOp linalgOp,
-                                  IREE::GPU::MmaInterfaceAttr mmaKind) {
+FailureOr<IREE::Codegen::InnerTiledOp> convertContractionToInnerTiledMma(
+    RewriterBase &rewriter, linalg::LinalgOp linalgOp,
+    IREE::Codegen::InnerTileDescAttrInterface mmaKind) {
   if (!linalgOp.hasPureTensorSemantics()) {
     return failure();
   }
