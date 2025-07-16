@@ -1109,13 +1109,13 @@ FailureOr<IREE::Codegen::InnerTiledOp> convertScaledContractionToInnerTiledMma(
 
   // TODO: Enable batched intrinsics and get the appropriate sub-map here.
   SmallVector<int64_t> lhsInnerPerm = getNormalizedPermutation(
-      lhsMap.getMinorSubMap(3), {mExpr, kBExpr, kExpr});
+      lhsMap.getMinorSubMap(3), {mExpr, kExpr, kBExpr});
   SmallVector<int64_t> sc1InnerPerm =
-      getNormalizedPermutation(sc1Map.getMinorSubMap(2), {mExpr, kBExpr});
+      getNormalizedPermutation(sc1Map.getMinorSubMap(2), {mExpr, kExpr});
   SmallVector<int64_t> rhsInnerPerm = getNormalizedPermutation(
-      rhsMap.getMinorSubMap(3), {kBExpr, kExpr, nExpr});
+      rhsMap.getMinorSubMap(3), {kExpr, kBExpr, nExpr});
   SmallVector<int64_t> sc2InnerPerm =
-      getNormalizedPermutation(sc2Map.getMinorSubMap(2), {nExpr, kBExpr});
+      getNormalizedPermutation(sc2Map.getMinorSubMap(2), {nExpr, kExpr});
   SmallVector<int64_t> accInnerPerm =
       getNormalizedPermutation(accMap.getMinorSubMap(2), {mExpr, nExpr});
   if (lhsInnerPerm.empty() || sc1InnerPerm.empty() || rhsInnerPerm.empty() ||

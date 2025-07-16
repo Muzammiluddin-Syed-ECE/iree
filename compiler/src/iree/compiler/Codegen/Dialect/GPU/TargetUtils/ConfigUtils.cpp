@@ -248,7 +248,7 @@ static std::optional<GPUMMASchedule> getScaledMmaScheduleFromProblemAndTarget(
     auto [m, n, k, kB] = smma.getScaledMNKShape();
     SmallVector<Type> elementTypes;
     smma.getElementTypes(elementTypes);
-    intrinsics.emplace_back(GPUIntrinsicType({m}, {n}, {kB, k}, {},
+    intrinsics.emplace_back(GPUIntrinsicType({m}, {n}, {k, kB}, {},
                                              elementTypes[0], elementTypes[2],
                                              elementTypes[4], smma));
   }
@@ -565,19 +565,19 @@ getScaledMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
     }
     nDims.push_back(nDim);
   }
-  for (int64_t kBDim : contractionKB) {
-    if (ShapedType::isDynamic(bounds[kBDim])) {
-      canSupportUnaligned = false;
-      continue;
-    }
-    kDims.push_back(kBDim);
-  }
   for (int64_t kDim : contractionK) {
     if (ShapedType::isDynamic(bounds[kDim])) {
       canSupportUnaligned = false;
       continue;
     }
     kDims.push_back(kDim);
+  }
+  for (int64_t kBDim : contractionKB) {
+    if (ShapedType::isDynamic(bounds[kBDim])) {
+      canSupportUnaligned = false;
+      continue;
+    }
+    kDims.push_back(kBDim);
   }
   for (int64_t batchDim : contractionB) {
     if (ShapedType::isDynamic(bounds[batchDim])) {

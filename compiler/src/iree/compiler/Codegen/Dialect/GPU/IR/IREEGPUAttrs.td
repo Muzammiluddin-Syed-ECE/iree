@@ -375,10 +375,10 @@ def IREEGPU_ScaledMMAAttr :
     // Return all supported element types for inputs
     static SmallVector<Type> getSupportedInputTypes(MLIRContext *ctx);
     static SmallVector<Type> getSupportedOutputTypes(MLIRContext *ctx);
-    
+
     // Return preferred subgroup size
     int64_t getSubgroupSize() const;
-    
+
     /// Returns the shape of the scaled MMA operation:
     /// ```
     ///   C += A * B
