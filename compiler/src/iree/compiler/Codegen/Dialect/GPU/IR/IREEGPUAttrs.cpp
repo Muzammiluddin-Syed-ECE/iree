@@ -491,17 +491,19 @@ static OpaqueMmaLayout getOpaqueMMALayout(MLIRContext *context,
   return o;
 }
 
-MMASingleSubgroupLayout getSingleSubgroupLayout(IREE::Codegen::InnerTileDescAttrInterface mmaKind,
-                                                MMAFragment fragment) {
+MMASingleSubgroupLayout
+getSingleSubgroupLayout(IREE::Codegen::InnerTileDescAttrInterface mmaKind,
+                        MMAFragment fragment) {
   if (auto mmaAttr = dyn_cast<MMAAttr>(mmaKind)) {
     // |colMajor| indicates that the accumulator layout should be returned
     // column major.
-    return getSingleSubgroupLayout(mmaAttr.getIntrinsic(), fragment,
-                                   fragment == MMAFragment::Acc &&
-                                       mmaAttr.getColMajor());
+    return IREE::GPU::getSingleSubgroupLayout(mmaAttr.getIntrinsic(), fragment,
+                                              fragment == MMAFragment::Acc &&
+                                                  mmaAttr.getColMajor());
   }
   if (auto vmmaAttr = dyn_cast<VirtualMMAAttr>(mmaKind)) {
-    return getSingleSubgroupLayout(vmmaAttr.getIntrinsic(), fragment);
+    return IREE::GPU::getSingleSubgroupLayout(vmmaAttr.getIntrinsic(),
+                                              fragment);
   }
   assert(false && "unhandled MMA Interface type.");
   return {};

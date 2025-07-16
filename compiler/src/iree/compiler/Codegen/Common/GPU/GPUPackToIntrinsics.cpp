@@ -57,7 +57,7 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
   FailureOr<IREE::LinalgExt::ScaledContractionDimensions> scaledContrDims =
       IREE::LinalgExt::inferScaledContractionDims(linalgOp);
   if (succeeded(scaledContrDims)) {
-    auto [m, n, k, kB] = kind.getScaledMNKShape();
+    auto [m, n, k, kB] = IREE::GPU::ScaledMMAAttr::getScaledMNKShape(kind);
     indices = {scaledContrDims->m, scaledContrDims->n, scaledContrDims->k,
                scaledContrDims->kB};
     return createPackedSizes({m, n, k, kB}, indices);
@@ -69,7 +69,7 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
     linalgOp.emitError() << "failed to infer contraction dims\n";
     return failure();
   }
-  auto [m, n, k] = kind.getMNKShape();
+  auto [m, n, k] = IREE::GPU::MmaInterfaceAttr::getMNKShape(kind);
   indices = {contractionDims->m, contractionDims->n, contractionDims->k};
   return createPackedSizes({m, n, k}, indices);
 }
@@ -105,7 +105,8 @@ struct ConvertToMultiMma final : OpInterfaceRewritePattern<linalg::LinalgOp> {
     if (!kind) {
       return failure();
     }
-    if (failed(convertContractionToInnerTiledMma(rewriter, linalgOp, kind))) {
+    if (failed(IREE::GPU::convertContractionToInnerTiledMma(rewriter, linalgOp,
+                                                            kind))) {
       return failure();
     }
     return success();

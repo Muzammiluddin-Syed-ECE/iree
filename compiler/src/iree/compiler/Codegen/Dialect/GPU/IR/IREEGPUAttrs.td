@@ -376,11 +376,8 @@ def IREEGPU_ScaledMMAAttr :
     static SmallVector<Type> getSupportedInputTypes(MLIRContext *ctx);
     static SmallVector<Type> getSupportedOutputTypes(MLIRContext *ctx);
     
-    // Return the number of elements that share a scale.
-    int64_t getBlockSize();
-    
     // Return preferred subgroup size
-    int64_t getSubgroupSize();
+    int64_t getSubgroupSize() const;
     
     /// Returns the shape of the scaled MMA operation:
     /// ```
@@ -392,6 +389,15 @@ def IREEGPU_ScaledMMAAttr :
     getScaledMNKShape() const {
       ::llvm::SmallVector<::mlir::VectorType> preThreadTypes;
       getUndistributedTileTypes(preThreadTypes);
+      ::llvm::ArrayRef<int64_t> accShape = preThreadTypes[4].getShape();
+      ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
+      return {accShape[0], accShape[1], lhsShape[1], lhsShape[2]};
+    }
+
+    static ::std::tuple<int64_t, int64_t, int64_t, int64_t>
+    getScaledMNKShape(IREE::Codegen::InnerTileDescAttrInterface in) {
+      ::llvm::SmallVector<::mlir::VectorType> preThreadTypes;
+      in.getUndistributedTileTypes(preThreadTypes);
       ::llvm::ArrayRef<int64_t> accShape = preThreadTypes[4].getShape();
       ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
       return {accShape[0], accShape[1], lhsShape[1], lhsShape[2]};
@@ -414,7 +420,7 @@ def IREEGPU_MmaScheduleAttr : AttrDef<IREEGPU_Dialect, "MMASchedule"> {
   }];
 
   let parameters = (ins
-    "::mlir::iree_compiler::IREE::GPU::MmaInterfaceAttr":$intrinsic,
+    "::mlir::iree_compiler::IREE::Codegen::InnerTileDescAttrInterface":$intrinsic,
     "int64_t":$subgroup_m_count,
     "int64_t":$subgroup_n_count
   );

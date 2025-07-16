@@ -37,7 +37,7 @@ struct GPUIntrinsicType : public GPUMatmulShapeType {
       : GPUMatmulShapeType(m, n, k, a, b, c), mmaKind(kind) {}
   GPUIntrinsicType(ArrayRef<int64_t> m, ArrayRef<int64_t> n,
                    ArrayRef<int64_t> k, ArrayRef<int64_t> batch, Type a, Type b,
-                   IREE::Codegen::InnerTileDescAttrInterface kind)
+                   Type c, IREE::Codegen::InnerTileDescAttrInterface kind)
       : GPUMatmulShapeType(m, n, k, batch, a, b, c), mmaKind(kind) {}
 };
 

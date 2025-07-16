@@ -491,7 +491,7 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
     }
 
     int64_t innerKDim = contractionDims->k.back();
-    int64_t kPackFactor = std::get<2>(mmaKind.getMNKShape());
+    int64_t kPackFactor = std::get<2>(MmaInterfaceAttr::getMNKShape(mmaKind));
     paddingTileSizes[innerKDim] *= kPackFactor;
 
     attrs.emplace_back(StringAttr::get(context, "padding"),
@@ -721,7 +721,8 @@ getScaledMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
     int64_t innerKDim = contractionK.back();
     int64_t innerKBDim = contractionKB.back();
     int64_t blockSize = mmaKind.getBlockSize();
-    int64_t kPackFactor = std::get<2>(mmaKind.getScaledMNKShape()) / blockSize;
+    int64_t kPackFactor =
+        std::get<2>(ScaledMMAAttr::getScaledMNKShape(mmaKind)) / blockSize;
     paddingTileSizes[innerKDim] *= kPackFactor;
     paddingTileSizes[innerKBDim] = blockSize;
     attrs.emplace_back(StringAttr::get(context, "padding"),

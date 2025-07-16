@@ -1125,7 +1125,7 @@ FailureOr<IREE::Codegen::InnerTiledOp> convertScaledContractionToInnerTiledMma(
 
   SmallVector<int64_t> bounds = linalgOp.getStaticLoopRanges();
   auto [intrinsicM, intrinsicN, intrinsicK, intrinsicKB] =
-      mmaKind.getScaledMNKShape();
+      ScaledMMAAttr::getScaledMNKShape(mmaKind);
   if (intrinsicM != bounds[innerM] || intrinsicN != bounds[innerN] ||
       intrinsicK != bounds[innerK]) {
     return failure();
@@ -1276,7 +1276,8 @@ FailureOr<IREE::Codegen::InnerTiledOp> convertContractionToInnerTiledMma(
 
   SmallVector<int64_t> bounds = linalgOp.getStaticLoopRanges();
 
-  auto [intrinsicM, intrinsicN, intrinsicK] = mmaKind.getMNKShape();
+  auto [intrinsicM, intrinsicN, intrinsicK] =
+      MmaInterfaceAttr::getMNKShape(mmaKind);
   if (intrinsicM != bounds[innerM] || intrinsicN != bounds[innerN] ||
       intrinsicK != bounds[innerK]) {
     return failure();
@@ -1284,7 +1285,7 @@ FailureOr<IREE::Codegen::InnerTiledOp> convertContractionToInnerTiledMma(
 
   SmallVector<Value> inputs = linalgOp->getOperands();
   auto [lhsElementType, rhsElementType, accElementType] =
-      mmaKind.getABCElementTypes();
+      MmaInterfaceAttr::getABCElementTypes(mmaKind);
   if (cast<RankedTensorType>(inputs[0].getType()).getElementType() !=
           lhsElementType ||
       cast<RankedTensorType>(inputs[1].getType()).getElementType() !=
