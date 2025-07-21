@@ -1167,7 +1167,6 @@ Value findOrCreateSubspanBuffer(
          "expected the result of subspanOp is DispatchTensorType");
 
   Value byteOffset = subspanOp.getByteOffset();
-  // llvm::errs() << subspanOp.getResult() << " ==\n";
   MemRefLayoutAttrInterface layoutAttr = {};
   if (byteOffset && !matchPattern(byteOffset, m_Zero())) {
     // Using buffer resources on AMDGPU will require buffers to be relocated to
@@ -1191,7 +1190,7 @@ Value findOrCreateSubspanBuffer(
   auto memRefType =
       MemRefType::get(shapedType.getShape(), shapedType.getBoundElementType(),
                       layoutAttr, memorySpace);
-  llvm::errs() << memRefType << " ==\n";
+
   // Look for an existing op.
   Block *block = subspanOp->getBlock();
   for (Operation &op : *block) {
@@ -1216,7 +1215,6 @@ Value findOrCreateSubspanBuffer(
       continue;
 
     if (useRocdlBuffers && bufferSubspanOp->hasOneUse()) {
-      llvm::errs() << "[DEBUG] this one ++\n";
       auto castOp = llvm::dyn_cast<amdgpu::FatRawBufferCastOp>(
           *bufferSubspanOp->getUsers().begin());
       if (!castOp)
@@ -1235,18 +1233,11 @@ Value findOrCreateSubspanBuffer(
       subspanOp.getBinding(), subspanOp.getByteOffset(),
       subspanOp.getDynamicDims(), subspanOp.getAlignmentAttr(),
       subspanOp.getDescriptorFlagsAttr());
-  llvm::errs() << "[DEBUG]" << buffer << "\n";
   if (useRocdlBuffers) {
-    llvm::errs() << "[DEBUG] this one --\n";
     buffer = rewriter.create<amdgpu::FatRawBufferCastOp>(
         subspanOp->getLoc(), buffer, /*validBytes=*/Value{},
         /*cacheSwizzleStride=*/Value{}, /*boundsCheck=*/true,
         /*resetOffset=*/true);
-    // llvm::errs() << "[DEBUG]" << buffer << "\n";
-    // auto [f, s] = llvm::dyn_cast<MemRefType>(buffer.getType()).getStridesAndOffset();
-    // llvm::errs() << f << "\n";
-    // llvm::errs() << s << "\n";
-    // llvm::errs() << buffer.getType() << "\n";
   }
   return buffer;
 }

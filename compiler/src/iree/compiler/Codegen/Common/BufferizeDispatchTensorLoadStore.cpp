@@ -33,15 +33,11 @@ static Value getBufferizedSubspanOrSubview(
   std::tie(std::ignore, dynamicSizes) = decomposeMixedValues(sizes);
   if (equalTensorShape(tensorType, dynamicSizes, dispatchTensorType,
                        subspanDynamicSizes)) {
-    llvm::errs() << "[DEBUG] - insince subspan or view\n";
-    llvm::errs() << subspanMemref;
     return subspanMemref;
   }
   MemRefType subviewMemRefType = memref::SubViewOp::inferRankReducedResultType(
       tensorType.getShape(), cast<MemRefType>(subspanMemref.getType()), offsets,
       sizes, strides);
-  llvm::errs() << "[DEBUG] - insince subspan or view 2\n";
-  llvm::errs() << subviewMemRefType;
   return rewriter.create<memref::SubViewOp>(
       loc, subviewMemRefType, subspanMemref, offsets, sizes, strides);
 }
@@ -49,7 +45,6 @@ static Value getBufferizedSubspanOrSubview(
 static void
 bufferizeDispatchTensorLoad(RewriterBase &rewriter,
                             IREE::TensorExt::DispatchTensorLoadOp loadOp) {
-  llvm::errs() << "[DEBUG] - Does it arrive to bufferize\n";
   Value source = loadOp.getSource();
   auto subspanOp = source.getDefiningOp<IREE::HAL::InterfaceBindingSubspanOp>();
   if (!subspanOp) {

@@ -121,7 +121,6 @@ materializeFuncOpEncodings(FunctionOpInterface funcOp,
   {
     RewritePatternSet patterns(ctx);
     // NOTE: These patterns are currently load-bearing for sub-byte floats.
-    llvm::errs() << "[DEBUG] Materializefuncopendcodings\n";
     populateReshapeToInterfaceTensorPatterns(patterns);
     tensor::CastOp::getCanonicalizationPatterns(patterns, ctx);
     tensor::populateFoldTensorEmptyPatterns(patterns);

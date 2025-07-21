@@ -146,7 +146,6 @@ convertToIGEMMAndSetConfig(FunctionOpInterface funcOp,
                                                  context);
     tensor::ExpandShapeOp::getCanonicalizationPatterns(
         bubbleCollapseShapePatterns, context);
-    llvm::errs() << "[DEBUG] convertToIGEMM\n";
     populateReshapeToInterfaceTensorPatterns(bubbleCollapseShapePatterns);
     if (failed(applyPatternsGreedily(funcOp,
                                      std::move(bubbleCollapseShapePatterns)))) {

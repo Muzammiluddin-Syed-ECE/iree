@@ -257,7 +257,6 @@ void transform_dialect::ApplyBubblePackUnpackPatternsOp::populatePatterns(
 
 void transform_dialect::ApplyFoldReshapeIntoTensorHalInterfacePatternsOp::
     populatePatterns(RewritePatternSet &patterns) {
-    llvm::errs() << "[DEBUG] ApplyFoldReshapeIntoTensorHalInterfacePatternsOp\n"; 
   populateReshapeToInterfaceTensorPatterns(patterns);
 }
 

@@ -26,7 +26,6 @@ public:
 class IntegerTypeConverter : public TypeConverter {
 public:
   static Type convertType(Type type) {
-    llvm::errs() << "IN HERE AFTER? 6\n";
     if (auto iType = llvm::dyn_cast<IntegerType>(type)) {
       if (!iType.isSignless()) {
         return IntegerType::get(type.getContext(),

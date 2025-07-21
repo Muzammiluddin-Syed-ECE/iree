@@ -71,22 +71,19 @@ struct DispatchTensorLoadOpInterface
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const BufferizationOptions &options,
                           bufferization::BufferizationState &state) const {
-    llvm::errs() << "[DEBUG] Please get in here buffer\n";
     auto loadOp = cast<IREE::TensorExt::DispatchTensorLoadOp>(op);
     auto tensorSubspanOp =
         loadOp.getSource()
             .getDefiningOp<IREE::HAL::InterfaceBindingSubspanOp>();
     assert(tensorSubspanOp && "expected that source is a SubspanOp");
     Value source = findOrCreateSubspanBuffer(rewriter, tensorSubspanOp);
-    // tensorSubspanOp->print(llvm::errs()), llvm::errs() << "-- \n";
-    llvm::errs() << source << "\n";
+
     if (equalTensorShape(loadOp.getType(), loadOp.sizes(),
                          llvm::cast<IREE::TensorExt::DispatchTensorType>(
                              loadOp.getSource().getType()),
                          loadOp.getSourceDims())) {
       // The entire tensor is loaded.
       replaceOpWithBufferizedValues(rewriter, op, source);
-      llvm::errs() << "DONE DONE DONE" << "\n";
       return success();
     }
 
@@ -95,8 +92,6 @@ struct DispatchTensorLoadOpInterface
         loadOp.getType().getShape(), llvm::cast<MemRefType>(source.getType()),
         loadOp.getMixedOffsets(), loadOp.getMixedSizes(),
         loadOp.getMixedStrides());
-    llvm::errs() << "[DEBUG] making sure \n";
-    llvm::errs() << subviewMemRefType<<"\n";
     replaceOpWithNewBufferizedOp<memref::SubViewOp>(
         rewriter, op, llvm::cast<MemRefType>(subviewMemRefType), source,
         loadOp.getMixedOffsets(), loadOp.getMixedSizes(),

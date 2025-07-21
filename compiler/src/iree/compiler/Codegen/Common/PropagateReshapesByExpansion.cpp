@@ -308,7 +308,6 @@ void PropagateReshapesByExpansionPass::runOnOperation() {
     RewritePatternSet patterns(context);
     // Preemptively attempt to fold any reshapes into interface bindings if
     // possible to simplify subsequent reshape propagation.
-    llvm::errs() << "[DEBUG] PropagateReshapesByExpansionPass\n";
     populateReshapeToInterfaceTensorPatterns(patterns);
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
@@ -341,7 +340,6 @@ void PropagateReshapesByExpansionPass::runOnOperation() {
                                                context);
   tensor::ExpandShapeOp::getCanonicalizationPatterns(bubbleExpandShapePatterns,
                                                      context);
-  llvm::errs() << "[DEBUG] PropagateReshapesByExpansionPass::RunonOperation\n";
   populateReshapeToInterfaceTensorPatterns(bubbleExpandShapePatterns);
   bubbleExpandShapePatterns.add<ExpandDestinationForallOp>(context);
 
