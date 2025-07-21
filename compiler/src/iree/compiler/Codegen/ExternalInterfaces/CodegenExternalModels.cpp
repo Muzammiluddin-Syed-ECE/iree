@@ -19,6 +19,7 @@ struct EncodingNopLayoutMaterializerAttr final
     : IREE::Encoding::LayoutMaterializerAttr::ExternalModel<
           EncodingNopLayoutMaterializerAttr, EncodingNopLayoutAttr> {
   Type convertType(Attribute attr, Type type) const {
+    llvm::errs() << "IN HERE AFTER?\n";
     return TypeSwitch<Type, Type>(type)
         .Case<RankedTensorType>([&](auto rankedTensorType) {
           return rankedTensorType.dropEncoding();

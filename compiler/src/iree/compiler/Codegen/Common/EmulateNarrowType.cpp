@@ -42,6 +42,7 @@ struct ConvertHalInterfaceBindingSubspan final
   LogicalResult
   matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    llvm::errs() << "[DEBUG] ConvertHalInterfaceBindingSubspan\n";
     auto currentType = dyn_cast<MemRefType>(op.getType());
     if (!currentType) {
       return rewriter.notifyMatchFailure(op->getLoc(),

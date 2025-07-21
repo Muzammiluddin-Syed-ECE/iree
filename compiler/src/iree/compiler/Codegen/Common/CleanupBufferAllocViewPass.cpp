@@ -35,6 +35,7 @@ struct CleanupBufferAllocViewPass final
     : impl::CleanupBufferAllocViewPassBase<CleanupBufferAllocViewPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
+    llvm::errs() << "[DEBUG] CleanupBufferAllocViewPass\n";
     populateReshapeToInterfaceTensorPatterns(patterns);
     populateFoldTensorReshapeIntoBufferPatterns(patterns);
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {

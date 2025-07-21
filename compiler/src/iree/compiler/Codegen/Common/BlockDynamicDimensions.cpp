@@ -401,6 +401,7 @@ void BlockDynamicDimensionsPass::runOnOperation() {
     // Add patterns to fold the "bubbled-up" `tensor.expand_shape` operation and
     // "pushed-down" `tensor.collapse_shape` operation with their interface
     // bindings or `tensor.empty` operations.
+    llvm::errs() << "[DEBUG] bindings or `tensor.empty` operations.\n";
     populateReshapeToInterfaceTensorPatterns(bubbleExpandShapePatterns);
     populateCombineRelayoutOpPatterns(bubbleExpandShapePatterns);
     populateFoldTensorReshapeIntoBufferPatterns(bubbleExpandShapePatterns);
@@ -436,6 +437,7 @@ void BlockDynamicDimensionsPass::runOnOperation() {
         removeBarrierOpsPatterns, context);
     // Add patterns to fold the remaining reshape operation with their interface
     // bindings or `tensor.empty` operations.
+    llvm::errs() << "[DEBUG] ----> bindings or `tensor.empty` operations.\n";
     populateReshapeToInterfaceTensorPatterns(removeBarrierOpsPatterns);
     populateCombineRelayoutOpPatterns(removeBarrierOpsPatterns);
     populateFoldTensorReshapeIntoBufferPatterns(removeBarrierOpsPatterns);

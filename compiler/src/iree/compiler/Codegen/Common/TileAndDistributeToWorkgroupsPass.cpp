@@ -295,6 +295,7 @@ void TileAndDistributeToWorkgroupsPass::runOnOperation() {
 
   {
     RewritePatternSet patterns(context);
+    llvm::errs() << "[DEBUG] TileAndDistributeToWorkgroupsPass\n";
     populateReshapeToInterfaceTensorPatterns(patterns);
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       funcOp.emitOpError("reshape to interface tensor patterns failed");
