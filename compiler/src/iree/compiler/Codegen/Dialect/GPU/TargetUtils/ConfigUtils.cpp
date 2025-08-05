@@ -124,6 +124,89 @@ LogicalResult setDataTiledMultiMmaLoweringConfig(
       workgroupSize, targetSubgroupSize, pipelineConfig);
 }
 
+#if 0
+LogicalResult setDataTiledScaledMmaLoweringConfig(
+    IREE::GPU::TargetAttr target, mlir::FunctionOpInterface entryPoint,
+    Operation *op) {
+  auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+  if (!linalgOp ||
+      (!IREE::LinalgExt::isaScaledContractionOpInterface(linalgOp))) {
+    return failure();
+  }
+  auto dataTiledMmaAttr = dyn_cast<DataTiledMMAAttr>(linalgOp.getKind());
+  if (!dataTiledMmaAttr) {
+    return failure();
+  }
+
+  LDBG("Packed Scaled MMA TileAndFuse Config");
+
+  // Compute workgroup size, which is given by the subgroup size times the
+  // number of subgroups. The number of subgroups is found by the product of
+  // subgroup unrolling factors, since the non-unrolled inner kernel takes a
+  // single subgroup.
+  const int64_t targetSubgroupSize = dataTiledMmaAttr.getSubgroupSize();
+  int64_t flatWorkgroupSize = targetSubgroupSize *
+                              dataTiledMmaAttr.getSubgroupsM() *
+                              dataTiledMmaAttr.getSubgroupsN();
+  std::array<int64_t, 3> workgroupSize{flatWorkgroupSize, 1, 1};
+
+  // Set all workgroup and reduction tile sizes to 1, since the data tiled
+  // kernel has the scope of an entire workgroup, and the reduction tiling is
+  // already baked into the "opaque" data tiled inner layout of the inner_tiled.
+  SmallVector<AffineMap> indexingMaps = multiMmaOp.getIndexingMapsArray();
+  mlir::linalg::ContractionDimensions contractionDims =
+      mlir::linalg::inferContractionDims(indexingMaps).value();
+
+  int64_t iterationRank = indexingMaps.front().getNumDims();
+  SmallVector<int64_t> workgroupTileSizes(iterationRank, 1);
+  SmallVector<int64_t> reductionTileSizes(iterationRank, 0);
+  for (int64_t kDim : contractionDims.k) {
+    workgroupTileSizes[kDim] = 0;
+    reductionTileSizes[kDim] = ukernelConfig ? 0 : 1;
+  }
+
+  // Set tile sizes.
+  MLIRContext *context = multiMmaOp.getContext();
+  SmallVector<NamedAttribute> attrs;
+  Builder b(context);
+  attrs.emplace_back(b.getStringAttr("workgroup"),
+                     b.getI64ArrayAttr(workgroupTileSizes));
+  attrs.emplace_back(b.getStringAttr("reduction"),
+                     b.getI64ArrayAttr(reductionTileSizes));
+  if (ukernelConfig) {
+    attrs.emplace_back(b.getStringAttr("ukernel"), ukernelConfig);
+  } else {
+    // Promote operands to use shared memory for LHS and RHS.
+    // Don't do that with ukernels: their untiled reduction dimension is too
+    // large to fit in shared memory, so they just want global memory and they
+    // will take care of moving small chunks at a time into a shared memory
+    // operand that will be created together with the ukernel op.
+    GPU::appendPromotedOperandsList(context, attrs, {0, 1});
+  }
+  auto configDict = b.getDictionaryAttr(attrs);
+  auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
+
+  // Don't add any special padding or prefetching, since the data-tiled layout
+  // is already what we want.
+  SmallVector<NamedAttribute, 1> pipelineAttrs;
+  auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
+      context, /*prefetchSharedMemory=*/false,
+      /*no_reduce_shared_memory_bank_conflicts=*/true,
+      /*use_igemm_convolution=*/false,
+      /*reorder_workgroups_strategy=*/std::nullopt);
+  pipelineAttrs.emplace_back(
+      b.getStringAttr(IREE::GPU::GPUPipelineOptionsAttr::getDictKeyName()),
+      pipelineOptions);
+  auto pipelineConfig = b.getDictionaryAttr(pipelineAttrs);
+
+  // TODO(qedawkins): Use a shared pipeline identifier here.
+  return setOpConfigAndEntryPointFnTranslation(
+      entryPoint, op, loweringConfig,
+      IREE::Codegen::DispatchLoweringPassPipeline::LLVMGPUTileAndFuse,
+      workgroupSize, targetSubgroupSize, pipelineConfig);
+}
+#endif
+
 /// Given a target and a matmul problem, try to find an MMA schedule for the
 /// problem based on the available mma intrinsics.
 static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(

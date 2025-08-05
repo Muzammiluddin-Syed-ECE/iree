@@ -338,9 +338,19 @@ static GPUMMASchedule getOptimalMMASchedule(const GPUMatmulShapeType &problem,
       llvm::divideCeil(problem.mSizes.back(), intrinsic.mSizes[0]);
   nTotalTileCounts.back() =
       llvm::divideCeil(problem.nSizes.back(), intrinsic.nSizes[0]);
+  llvm::errs() << "problem m sizes: ";
+  for (auto p : mTotalTileCounts) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
+  llvm::errs() << "problem n sizes: ";
+  for (auto p : nTotalTileCounts) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
+  llvm::errs() << "instrinsic m sizes: ";
+  for (auto p : intrinsic.mSizes) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
+  llvm::errs() << "instrinsic n sizes: ";
+  for (auto p : intrinsic.nSizes) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
 
   int64_t remainingSubgroups = seeds.bestSubgroupCountPerWorkgroup;
   int64_t remainingTiles = seeds.bestMNTileCountPerSubgroup;
+  llvm::errs() << "remainingSubgroups: " << remainingSubgroups << "\n";
+  llvm::errs() << "remainingTiles: " << remainingTiles << "\n";
   // Assign more subgroups to the M dimension (used later) to balance thread
   // counts along X and Y dimensions.
   int mDim = problem.mSizes.size() - 1;
@@ -354,7 +364,9 @@ static GPUMMASchedule getOptimalMMASchedule(const GPUMatmulShapeType &problem,
   while (mDim >= 0 || nDim >= 0) {
     int64_t subgroupSqrt =
         1ull << (llvm::divideCeil(llvm::Log2_64(remainingSubgroups), 2));
-    int64_t tileSqrt = 1ull << (llvm::Log2_64(remainingTiles) / 2);
+    llvm::errs() << "uu " << subgroupSqrt << "\n";
+    int64_t tileSqrt = remainingTiles == 1 ? 1 : 1ull << (llvm::Log2_64(remainingTiles) / 2);
+    llvm::errs() << "uu " << tileSqrt << "\n";
 
     // See if the square root can divide mTotalTileCount. If so it means we can
     // distribute to both dimensions evenly to minimize the number of global
@@ -362,6 +374,7 @@ static GPUMMASchedule getOptimalMMASchedule(const GPUMatmulShapeType &problem,
     if (mDim >= 0 && nDim >= 0 &&
         mTotalTileCounts[mDim] > (subgroupSqrt * tileSqrt) &&
         mTotalTileCounts[mDim] % (subgroupSqrt * tileSqrt) == 0) {
+      llvm::errs() << "uu - entered 1\n";
       mSubgroupCounts[mDim] = subgroupSqrt;
       mTileSizes[mDim] = tileSqrt;
 
@@ -379,6 +392,7 @@ static GPUMMASchedule getOptimalMMASchedule(const GPUMatmulShapeType &problem,
       nTileSizes[nDim] = nGCD.getSExtValue();
       remainingTiles /= nTileSizes[nDim];
     } else {
+      llvm::errs() << "uu - entered 2\n";
       if (nDim >= 0) {
         APInt nGCD = GreatestCommonDivisor(APInt(64, nTotalTileCounts[nDim]),
                                            APInt(64, remainingSubgroups));
@@ -411,7 +425,11 @@ static GPUMMASchedule getOptimalMMASchedule(const GPUMatmulShapeType &problem,
 
   SmallVector<int64_t> kTileSizes =
       getBestKTileSizes(problem, intrinsic, seeds);
-
+  llvm::errs() << "MMA SCHEDULE\n";
+  for (auto p : mSubgroupCounts) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
+  for (auto p : nSubgroupCounts) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
+  for (auto p : mTileSizes) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
+  for (auto p : nTileSizes) {llvm::errs() << p << ", ";}llvm::errs() << "\n";
   return GPUMMASchedule{
       intrinsic.mmaKind,   intrinsic.mSizes[0], intrinsic.nSizes[0],
       intrinsic.kSizes[0], mSubgroupCounts,     nSubgroupCounts,

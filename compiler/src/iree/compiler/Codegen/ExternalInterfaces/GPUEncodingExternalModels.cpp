@@ -369,6 +369,7 @@ struct GPUEncodingResolverMaterializerAttr
   Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
                      TypeRange convertedResTypes,
                      ValueRange convertedOperands) const {
+    llvm::errs() << "POPOPOPOPOP\n";
     auto layoutAttr = cast<GPUEncodingResolverAttr>(attr);
     auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
     if (!linalgOp) {

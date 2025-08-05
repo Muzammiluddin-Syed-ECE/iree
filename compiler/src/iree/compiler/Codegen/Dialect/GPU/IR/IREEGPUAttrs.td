@@ -403,6 +403,73 @@ def IREEGPU_ScaledMMAAttr :
   }];
 }
 
+def IREEGPU_PackedScaledMMAAttr :
+    AttrDef<IREEGPU_Dialect, "PackedScaledMMA", [
+  DeclareAttrInterfaceMethods<IREECodegen_InnerTileDescAttrInterface, [
+    "getExpectedNumInputs",
+    "getExpectedNumOutputs",
+    "verifyIndexingMaps",
+    "getUndistributedTileTypes",
+    "getDistributedTileTypes",
+    "getUndistributedTileDimExpansion",
+    "populateOperandOffsetsSizesStrides",
+    "getDistributionMappingKind",
+    "getDistributionWorkerCount",
+    "buildUnderlyingOperations",
+  ]>
+]> {
+  let mnemonic = "packed_scaled_mma_layout";
+  let cppNamespace = "::mlir::iree_compiler::IREE::GPU";
+
+  let description = [{
+    This attribute represents MMAs that operate on Scaled MMAs
+    (see ScaledMMAAttr) that use packed scales allowing efficient usage of
+    the fact that we pass in scales at a granularity of 32 bits.
+
+    This attribute takes inspiration from DataTiledMMAAttr.
+
+    By default, always try to pack 4 scales at a time.
+  }];
+
+  let assemblyFormat = "`<` struct(params) `>`";
+
+  let parameters = (ins
+    EnumParameter<IREEGPU_ScaledMMAIntrinsic>:$intrinsic,
+    "::mlir::Type":$lhs_elem_type,
+    "::mlir::Type":$rhs_elem_type,
+    "::mlir::Type":$acc_elem_type,
+    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major,
+    DefaultValuedParameter<"int64_t", "1", "Intrinsic count along the M dimension.">:$intrinsics_m,
+    DefaultValuedParameter<"int64_t", "1", "Subgroup count along the M dimension.">:$subgroups_m,
+    DefaultValuedParameter<"int64_t", "1", "Intrinsic count along the N dimension.">:$intrinsics_n,
+    DefaultValuedParameter<"int64_t", "1", "Subgroup count along the N dimension.">:$subgroups_n,
+    DefaultValuedParameter<"int64_t", "1", "Intrinsic count along the K dimension, with interleaved layout.">:$intrinsics_k
+  );
+
+  let extraClassDeclaration = [{
+    // Return the number of elements per shared scale.
+    int64_t getBlockSize() const;
+
+    // Return preferred subgroup size
+    int64_t getSubgroupSize() const;
+
+    /// Returns the shape of the scaled MMA operation:
+    /// ```
+    ///   C += A * B
+    /// ```
+    /// Where, up to some transpositions, `A` has shape `<M, K, KB>`, `B`
+    /// has shape `<K, KB, N>`, and `C` has shape `<M, N>`.
+    ::std::tuple<int64_t, int64_t, int64_t, int64_t>
+    getScaledMNKShape() const {
+      ::llvm::SmallVector<::mlir::VectorType> preThreadTypes;
+      getUndistributedTileTypes(preThreadTypes);
+      ::llvm::ArrayRef<int64_t> accShape = preThreadTypes[4].getShape();
+      ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
+      return {accShape[0], accShape[1], lhsShape[1], lhsShape[2]};
+    }
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // MMA schedule
 //===----------------------------------------------------------------------===//
