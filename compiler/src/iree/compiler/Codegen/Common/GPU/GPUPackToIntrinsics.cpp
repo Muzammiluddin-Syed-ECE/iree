@@ -58,7 +58,7 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
     FailureOr<IREE::LinalgExt::ScaledContractionDimensions> scaledContrDims =
         IREE::LinalgExt::inferScaledContractionDims(linalgOp);
     if (succeeded(scaledContrDims)) {
-      auto [m, n, k, kB] = smma_kind.getScaledMNKShape();
+      auto [m, n, k, kB] = smma_kind.getMNKShape();
       indices = {scaledContrDims->m, scaledContrDims->n, scaledContrDims->k,
                  scaledContrDims->kB};
       dims = {m, n, k, kB};

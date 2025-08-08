@@ -83,6 +83,28 @@ static MMAAttr chooseIntrinsicMMAAttr(TypeRange eTypes, TargetWgpAttr wgp) {
   return candidateMma;
 }
 
+static ScaledMMAAttr chooseIntrinsicScaledMMAAttr(TypeRange eTypes, TargetWgpAttr wgp) {
+  ScaledMMAAttr candidateSmma;
+  for (ScaledMMAAttr smma : wgp.getScaledMma()) {
+    // Filter out intrinsics that don't match the element types of this matmul.
+    auto [et0, et1, et2] = smma.getABCElementTypes();
+    if (et0 != eTypes[0] || et1 != eTypes[1] || et2 != eTypes[2]) {
+      continue;
+    }
+    // If multiple intrinsics are available for the given element types, we have
+    // to make a choice. On CDNA3, there may be an intrinsic with larger M/N and
+    // smaller K, which would optimize power, and an intrinsic with larger K,
+    // which would optimize performance when power is not the bottleneck.
+    // Currently we just choose the intrinsic maximizing K, but that can be
+    // revisited later.
+    if (candidateSmma && getKSize(candidateSmma) > getKSize(smma)) {
+      continue;
+    }
+    candidateSmma = smma;
+  }
+  return candidateSmma;
+}
+
 static DataTiledMMAAttr
 chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
                        IREE::Encoding::EncodingAttr encoding) {

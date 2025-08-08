@@ -207,6 +207,55 @@ LogicalResult setDataTiledScaledMmaLoweringConfig(
 }
 #endif
 
+static int64_t getPackedScaledM() {
+  return  4;
+}
+
+static int64_t getPackedScaledN() {
+  return  4;
+}
+
+static int64_t getPackedScaledK() {
+  return  1;
+}
+
+static void getScaledMMAIntrinsics(SmallVector<GPUIntrinsicType> &intrinsics,
+                                   IREE::GPU::TargetAttr target) {
+  const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
+  for (IREE::GPU::ScaledMMAAttr smma : target.getWgp().getScaledMma()) {
+    // Intrinsics that do not specify a distribution kind cannot be
+    // distributed.
+    if (!smma.getDistributionMappingKind())
+      continue;
+    if (smma.getSubgroupSize() != targetSubgroupSize)
+      continue;
+
+    auto [m, n, k, kB] = smma.getMNKShape();
+    SmallVector<Type> elementTypes;
+    smma.getElementTypes(elementTypes);
+    intrinsics.emplace_back(GPUIntrinsicType({m}, {n}, {k, kB}, {},
+                                             elementTypes[0], elementTypes[2],
+                                             elementTypes[4], smma));
+  }
+}
+
+static void getMMAIntrinsics(SmallVector<GPUIntrinsicType> &intrinsics,
+                             IREE::GPU::TargetAttr target) {
+  const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
+  for (IREE::GPU::MMAAttr mma : target.getWgp().getMma()) {
+    // Intrinsics that do not specify a distribution kind cannot be
+    // distributed.
+    if (!mma.getDistributionMappingKind())
+      continue;
+    if (mma.getSubgroupSize() != targetSubgroupSize)
+      continue;
+
+    auto [mSize, nSize, kSize] = mma.getMNKShape();
+    auto [aType, bType, cType] = mma.getABCElementTypes();
+    intrinsics.emplace_back(mSize, nSize, kSize, aType, bType, cType, mma);
+  }
+}
+
 /// Given a target and a matmul problem, try to find an MMA schedule for the
 /// problem based on the available mma intrinsics.
 static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
@@ -216,34 +265,9 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
   const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
   SmallVector<GPUIntrinsicType> intrinsics;
   if (scaled) {
-    for (IREE::GPU::ScaledMMAAttr smma : target.getWgp().getScaledMma()) {
-      // Intrinsics that do not specify a distribution kind cannot be
-      // distributed.
-      if (!smma.getDistributionMappingKind())
-        continue;
-      if (smma.getSubgroupSize() != targetSubgroupSize)
-        continue;
-
-      auto [m, n, k, kB] = smma.getScaledMNKShape();
-      SmallVector<Type> elementTypes;
-      smma.getElementTypes(elementTypes);
-      intrinsics.emplace_back(GPUIntrinsicType({m}, {n}, {k, kB}, {},
-                                               elementTypes[0], elementTypes[2],
-                                               elementTypes[4], smma));
-    }
+    getScaledMMAIntrinsics(intrinsics, target);
   } else {
-    for (IREE::GPU::MMAAttr mma : target.getWgp().getMma()) {
-      // Intrinsics that do not specify a distribution kind cannot be
-      // distributed.
-      if (!mma.getDistributionMappingKind())
-        continue;
-      if (mma.getSubgroupSize() != targetSubgroupSize)
-        continue;
-
-      auto [mSize, nSize, kSize] = mma.getMNKShape();
-      auto [aType, bType, cType] = mma.getABCElementTypes();
-      intrinsics.emplace_back(mSize, nSize, kSize, aType, bType, cType, mma);
-    }
+    getMMAIntrinsics(intrinsics, target);
   }
   if (intrinsics.empty()) {
     return std::nullopt;
@@ -530,7 +554,7 @@ getMatmulLoweringConfigAndWorkgroupSize(SmallVector<int64_t> bounds,
     int64_t kPackFactor, innerKDim = contractionK.back();
     if (scaled) {
       auto smmaKind = dyn_cast<IREE::GPU::ScaledMMAAttr>(kind);
-      kPackFactor = std::get<2>(smmaKind.getScaledMNKShape());
+      kPackFactor = std::get<2>(smmaKind.getMNKShape());
     } else {
       auto mmaKind = dyn_cast<IREE::GPU::MmaInterfaceAttr>(kind);
       kPackFactor = std::get<2>(mmaKind.getMNKShape());

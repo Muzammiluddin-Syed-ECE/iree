@@ -482,6 +482,15 @@ int64_t getNSize(MMAIntrinsic intrinsic) {
 int64_t getKSize(MMAIntrinsic intrinsic) {
   return std::get<2>(getMNKShapeFromIntrinsic(intrinsic));
 }
+int64_t getKSize(IREE::Codegen::InnerTileDescAttrInterface mmaKind) {
+  if (auto smmaAttr = dyn_cast<ScaledMMAAttr>(mmaKind)) {
+    auto lhs = getSingleSubgroupLayout(smmaAttr.getIntrinsic(), 0);
+    return lhs.outer[1] * lhs.thread[1] * lhs.element[1];
+  }
+  auto mmaAttr = dyn_cast<MMAAttr>(mmaKind);
+  assert(mmaAttr && "Expected attribute to be MMAAttr");
+  return std::get<2>(getMNKShapeFromIntrinsic(mmaAttr.getIntrinsic()));
+}
 
 static OpaqueMmaLayout getOpaqueMMALayout(MLIRContext *context,
                                           MMAIntrinsic intrinsic) {
@@ -1695,14 +1704,16 @@ void PackedScaledMMAAttr::getUndistributedTileTypes(
       getSingleSubgroupLayout(getIntrinsic(), 2);
 
   int64_t blockSize = getBlockSize();
-  int64_t m = lhsLayout.outer[0] * lhsLayout.thread[0] * lhsLayout.element[0];
-  int64_t kScale =
-      lhsLayout.outer[1] * lhsLayout.thread[1] * lhsLayout.element[1];
+  int64_t m = (getSubgroupsM() * lhsLayout.outer[0]) *
+              (getIntrinsicsM() * lhsLayout.thread[0]) * lhsLayout.element[0];
+  int64_t kScale = lhsLayout.outer[1] * lhsLayout.thread[1] *
+                   lhsLayout.element[1] * getIntrinsicsK();
   [[maybe_unused]] int64_t layoutBlockSize =
       lhsLayout.outer[2] * lhsLayout.thread[2] * lhsLayout.element[2];
   assert(blockSize == layoutBlockSize &&
          "expected block size to be set up correctly");
-  int64_t n = rhsLayout.outer[2] * rhsLayout.thread[2] * rhsLayout.element[2];
+  int64_t n = rhsLayout.outer[2] * getSubgroupsN() * rhsLayout.thread[2] *
+              getIntrinsicsN() * rhsLayout.element[2];
 
   Type lhsType = getLhsElemType();
   Type rhsType = getRhsElemType();

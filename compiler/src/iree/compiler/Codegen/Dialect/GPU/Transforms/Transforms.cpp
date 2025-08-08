@@ -1095,7 +1095,7 @@ FailureOr<IREE::Codegen::InnerTiledOp> convertScaledContractionToInnerTiledMma(
 
   SmallVector<int64_t> bounds = linalgOp.getStaticLoopRanges();
   auto [intrinsicM, intrinsicN, intrinsicK, intrinsicKB] =
-      smmaKind.getScaledMNKShape();
+      smmaKind.getMNKShape();
   if (intrinsicM != bounds[innerM] || intrinsicN != bounds[innerN] ||
       intrinsicK != bounds[innerK]) {
     return failure();
