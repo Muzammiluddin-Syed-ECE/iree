@@ -1052,8 +1052,9 @@ void ConvertToLLVMPass::runOnOperation() {
   }
   auto populateTanhPatterns = [](RewritePatternSet &p) {
     StringRef fname = math::TanhOp::getOperationName();
-    size_t prefix = math::MathDialect::getDialectNamespace().size() + 1;
-    StringRef opName = fname.drop_front(prefix);
+    StringRef opName =
+        fname.drop_front(math::MathDialect::getDialectNamespace().size())
+            .drop_front(1);
     math::populateExpansionPatterns(p, /*OpMnemonics=*/{opName});
   };
   LLVMConversionTarget target(getContext());
