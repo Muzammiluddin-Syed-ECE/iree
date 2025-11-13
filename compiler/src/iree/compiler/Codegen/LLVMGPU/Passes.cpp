@@ -363,7 +363,7 @@ static FailureOr<Value> gpuRequireMemSpaceAllocationFn(OpBuilder &builder,
     auto flatAllocType = MemRefType::get(ArrayRef<int64_t>{memRefType.getNumElements()}, memRefType.getElementType(), AffineMap(), workgroupSpace);
     Value flatAlloc = memref::AllocOp::create(builder, loc, flatAllocType);
     Value swizzled = iree_compiler::IREE::Codegen::SwizzleHintOp::create(builder, loc, flatAlloc,
-                                                                         iree_compiler::IREE::Codegen::XORShuffleAttr::get(builder.getContext(), 4096, 32, int64_t(), int64_t()));
+                                                                         iree_compiler::IREE::Codegen::XORShuffleAttr::get(builder.getContext(), 64, 32, int64_t(), int64_t()));
     ReassociationIndices reassoc = llvm::to_vector(llvm::seq(allocType.getRank()));
     Value expanded = memref::ExpandShapeOp::create(builder, loc, allocType.getShape(), swizzled, {reassoc});
     return expanded;
