@@ -787,6 +787,20 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   // for later access in the pipeline.
   MLIRContext *context = lhs.getContext();
   Builder b(context);
+  // REMOVE THIS LATER
+  workgroupTileSizes[0] = 256;
+  workgroupTileSizes[1] = 256;
+  workgroupTileSizes[2] = 0;
+  workgroupTileSizes[3] = 0;
+  reductionTileSizes[0] = 0;
+  reductionTileSizes[1] = 0;
+  reductionTileSizes[2] = 2;
+  reductionTileSizes[3] = 1;
+  subgroupTileSizes[0] = 8;
+  subgroupTileSizes[1] = 8;
+  subgroupTileSizes[2] = 0;
+  subgroupTileSizes[3] = 0;
+
   SmallVector<NamedAttribute> attrs = {
       {"workgroup", b.getI64ArrayAttr(workgroupTileSizes)},
       {"reduction", b.getI64ArrayAttr(reductionTileSizes)},
