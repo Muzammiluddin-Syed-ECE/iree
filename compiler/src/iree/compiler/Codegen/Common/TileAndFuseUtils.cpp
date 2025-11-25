@@ -298,7 +298,10 @@ LogicalResult applyTileAndFuseToEachRoot(
               .getTilingLevelSizes(rewriter, llvm::to_underlying(tilingLevel),
                                    tilingInterfaceOp);
     }
-
+    for (auto tileSize : tileSizes) {
+      llvm::errs() << "tileSize: " << tileSize << "\n";
+    }
+    llvm::errs() << "numLoops: " << tilingInterfaceOp.getLoopIteratorTypes().size() << "\n";
     // Pad the tile sizes with zero.
     auto zero = rewriter.getIndexAttr(0);
     int64_t numLoops = tilingInterfaceOp.getLoopIteratorTypes().size();
