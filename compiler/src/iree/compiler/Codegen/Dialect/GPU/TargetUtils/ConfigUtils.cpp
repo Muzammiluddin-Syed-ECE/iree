@@ -535,6 +535,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
 
   SmallVector<unsigned, 2> contractionM, contractionN, contractionK,
       contractionKB, contractionB;
+  // llvm::errs() << "DEBUG - " << contractionM << "\n";
   if (scaled) {
     FailureOr<IREE::LinalgExt::ScaledContractionDimensions>
         scaledContractionDims =
@@ -728,6 +729,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
   LDBG() << "Target Subgroup size: " << targetSubgroupSize;
   LDBG() << "Schedule: " << schedule;
+  llvm::errs() << schedule;
 
   SmallVector<int64_t> workgroupTileSizes(bounds.size(), 0);
   SmallVector<int64_t> reductionTileSizes(bounds.size(), 0);

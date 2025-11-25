@@ -47,6 +47,7 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
             << "contraction like operation missing critical dimension\n";
         return failure();
       }
+      llvm::errs() << "dim: " << dim << " index: " << index.back() << "\n";
       packedSizes[index.back()] = rewriter.getIndexAttr(dim);
     }
     return packedSizes;
