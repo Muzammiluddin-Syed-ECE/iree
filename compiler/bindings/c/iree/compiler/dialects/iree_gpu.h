@@ -18,6 +18,7 @@ extern "C" {
 // Python bindings. Update both this typedef and the static assertions if the
 // enum underlying types change.
 typedef uint32_t mma_intrinsic_enum_t;
+typedef uint32_t scaled_mma_intrinsic_enum_t;
 
 // The following C API is **NOT STABLE** and likely to change in the future.
 // It mirrors the IREE GPU Dialect which is not stable itself.
@@ -158,6 +159,7 @@ struct ireeGPUTargetInfo {
   int32_t maxThreadCountPerWorkgroup; // Max threads per workgroup.
   int32_t maxWorkgroupMemoryBytes;    // Max workgroup memory.
   MlirAttribute mmaIntrinsics;        // MMA Intrinsics.
+  MlirAttribute scaledMmaIntrinsics;  // Scaled MMA Intrinsics.
   uint32_t wgpCount;                  // Workgroup count (CUs).
   int32_t simdsPerWgp;                // Optional SIMD num.
 };
@@ -171,7 +173,8 @@ MLIR_CAPI_EXPORTED ireeGPUTargetInfo ireeGPUTargetInfoGet(
     size_t numSubgroupChoices, const int32_t *workgroupSizes,
     size_t numWorkgroupSizes, int32_t threadCount, int32_t memoryBytes,
     uint32_t wgpCount, int32_t simdsPerWgp,
-    const mma_intrinsic_enum_t *mmaIntrinsics, size_t numMmaIntrinsics);
+    const mma_intrinsic_enum_t *mmaIntrinsics, size_t numMmaIntrinsics,
+    const mma_intrinsic_enum_t *scaledMmaIntrinsics, size_t numScaledMmaIntrinsics);
 
 // Extracts MMA intrinsic values and their virtual status from an ArrayAttr.
 //
@@ -180,7 +183,7 @@ MLIR_CAPI_EXPORTED ireeGPUTargetInfo ireeGPUTargetInfoGet(
 // virtualMmaIntrinsicTags: Output array - 1 if VirtualMMAIntrinsic, 0 if
 // MMAIntrinsic.
 MLIR_CAPI_EXPORTED void
-ireeGPUTargetInfoGetMMAIntrinsics(MlirAttribute mmaIntrinsics,
+ireeGPUTargetInfoGetMMAIntrinsics(MlirAttribute mmaIntrinsics, MlirAttribute scaledMmaIntrinsics,
                                   mma_intrinsic_enum_t *mmaIntrinsicVals,
                                   uint8_t *virtualMmaIntrinsicTags);
 
