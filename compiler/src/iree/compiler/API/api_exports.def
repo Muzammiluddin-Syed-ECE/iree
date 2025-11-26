@@ -5,24 +5,26 @@ EXPORTS
   ireeAttributeIsACodegenTranslationInfoAttr
   ireeAttributeIsAGPULoweringConfigAttr
   ireeAttributeIsAGPUMMAAttr
-  ireeAttributeIsAGPUVirtualMMAAttr
   ireeAttributeIsAGPUMMAIntrinsicAttr
-  ireeAttributeIsAGPUVirtualIntrinsicAttr
   ireeAttributeIsAGPUPipelineOptionsAttr
   ireeAttributeIsAGPUReorderWorkgroupsStrategyAttr
+  ireeAttributeIsAGPUVirtualMMAAttr
+  ireeAttributeIsAGPUVirtualMMAIntrinsicAttr
   ireeCodegenCompilationInfoAttrGet
   ireeCodegenCompilationInfoAttrGetParameters
   ireeCodegenCompilationInfoAttrGetTypeID
   ireeCodegenDispatchLoweringPassPipelineAttrGet
   ireeCodegenDispatchLoweringPassPipelineAttrGetTypeID
   ireeCodegenDispatchLoweringPassPipelineAttrGetValue
-  ireeCodegenGetExecutableVariantOps
-  ireeGPUGetSingleSubgroupLayout
-  ireeCodegenGetTunerRootOps
   ireeCodegenGetAttentionOpDetail
-  ireeCodegenMlirOperationIsACodegenAttentionOp
-  ireeCodegenHasIGEMMGenericConvDetails
+  ireeCodegenGetExecutableVariantOps
   ireeCodegenGetIGEMMGenericConvDetails
+  ireeCodegenGetTunerRootOps
+  ireeCodegenHasIGEMMGenericConvDetails
+  ireeCodegenInferScaledContractionDimensions
+  ireeCodegenInferScaledContractionDimensionsFromMaps
+  ireeCodegenMlirOperationIsACodegenAttentionOp
+  ireeCodegenMlirOperationIsAScaledContractionOp
   ireeCodegenTranslationInfoAttrGet
   ireeCodegenTranslationInfoAttrGetParameters
   ireeCodegenTranslationInfoAttrGetTypeID
@@ -56,6 +58,7 @@ EXPORTS
   ireeCompilerInvocationSetCrashHandler
   ireeCompilerInvocationSetDumpCompilationPhasesTo
   ireeCompilerInvocationSetVerifyIR
+  ireeCompilerInvocationSetupRemarks
   ireeCompilerOutputDestroy
   ireeCompilerOutputKeep
   ireeCompilerOutputMapMemory
@@ -77,6 +80,7 @@ EXPORTS
   ireeCompilerSourceOpenFile
   ireeCompilerSourceSplit
   ireeCompilerSourceWrapBuffer
+  ireeGPUGetSingleSubgroupLayout
   ireeGPULoweringConfigAttrGet
   ireeGPULoweringConfigAttrGetAttributes
   ireeGPULoweringConfigAttrGetMmaKind
@@ -84,17 +88,12 @@ EXPORTS
   ireeGPULoweringConfigAttrGetTileSizes
   ireeGPULoweringConfigAttrGetTypeID
   ireeGPUMMAAttrGet
-  ireeGPUVirtualMMAAttrGet
   ireeGPUMMAAttrGetInfo
   ireeGPUMMAAttrGetTypeID
-  ireeGPUVirtualMMAAttrGetTypeID
-  ireeGPUMMAIntrinsicAttrGet
-  ireeGPUVirtualMMAIntrinsicAttrGet
-  ireeGPUMMAIntrinsicAttrGetTypeID
-  ireeGPUVirtualMMAIntrinsicAttrGetTypeID
-  ireeGPUMMAIntrinsicAttrGetValue
-  ireeGPUVirtualMMAIntrinsicAttrGetValue
   ireeGPUMMAAttrGetVirtualMMAIntrinsic
+  ireeGPUMMAIntrinsicAttrGet
+  ireeGPUMMAIntrinsicAttrGetTypeID
+  ireeGPUMMAIntrinsicAttrGetValue
   ireeGPUPipelineOptionsAttrGet
   ireeGPUPipelineOptionsAttrGetNoReduceSharedMemoryBankConflicts
   ireeGPUPipelineOptionsAttrGetPrefetchSharedMemory
@@ -106,6 +105,11 @@ EXPORTS
   ireeGPUReorderWorkgroupsStrategyAttrGetValue
   ireeGPUTargetInfoGet
   ireeGPUTargetInfoGetMMAIntrinsics
+  ireeGPUVirtualMMAAttrGet
+  ireeGPUVirtualMMAAttrGetTypeID
+  ireeGPUVirtualMMAIntrinsicAttrGet
+  ireeGPUVirtualMMAIntrinsicAttrGetTypeID
+  ireeGPUVirtualMMAIntrinsicAttrGetValue
   ireeHALExecutableTargetAttrGetGPUTargetInfo
   ireeLinkRunMain
   ireeMlirLspServerRunMain
@@ -178,6 +182,7 @@ EXPORTS
   mlirAffineSymbolExprGet
   mlirAffineSymbolExprGetPosition
   mlirApplyPatternsAndFoldGreedily
+  mlirApplyPatternsAndFoldGreedilyWithOp
   mlirArrayAttrGet
   mlirArrayAttrGetElement
   mlirArrayAttrGetNumElements
@@ -229,6 +234,7 @@ EXPORTS
   mlirBlockAppendOwnedOperation
   mlirBlockArgumentGetArgNumber
   mlirBlockArgumentGetOwner
+  mlirBlockArgumentSetLocation
   mlirBlockArgumentSetType
   mlirBlockCreate
   mlirBlockDestroy
@@ -239,8 +245,12 @@ EXPORTS
   mlirBlockGetFirstOperation
   mlirBlockGetNextInRegion
   mlirBlockGetNumArguments
+  mlirBlockGetNumPredecessors
+  mlirBlockGetNumSuccessors
   mlirBlockGetParentOperation
   mlirBlockGetParentRegion
+  mlirBlockGetPredecessor
+  mlirBlockGetSuccessor
   mlirBlockGetTerminator
   mlirBlockInsertArgument
   mlirBlockInsertOwnedOperation
@@ -539,6 +549,12 @@ EXPORTS
   mlirLLVMStructTypeSetBody
   mlirLLVMVoidTypeGet
   mlirLinalgFillBuiltinNamedOpRegion
+  mlirLinalgGetIndexingMapsAttribute
+  mlirLinalgInferContractionDimensions
+  mlirLinalgInferContractionDimensionsFromMaps
+  mlirLinalgInferConvolutionDimensions
+  mlirLinalgIsAContractionOp
+  mlirLinalgIsAConvolutionOp
   mlirLlvmThreadPoolCreate
   mlirLlvmThreadPoolDestroy
   mlirLocationCallSiteGet
@@ -586,10 +602,12 @@ EXPORTS
   mlirModuleCreateParse
   mlirModuleCreateParseFromFile
   mlirModuleDestroy
+  mlirModuleEqual
   mlirModuleFromOperation
   mlirModuleGetBody
   mlirModuleGetContext
   mlirModuleGetOperation
+  mlirModuleHashValue
   mlirNamedAttributeGet
   mlirNoneTypeGet
   mlirNoneTypeGetTypeID
@@ -613,6 +631,7 @@ EXPORTS
   mlirOpPrintingFlagsUseLocalScope
   mlirOpResultGetOwner
   mlirOpResultGetResultNumber
+  mlirOpRewritePatternCreate
   mlirOpaqueAttrGet
   mlirOpaqueAttrGetData
   mlirOpaqueAttrGetDialectNamespace
@@ -651,8 +670,10 @@ EXPORTS
   mlirOperationGetSuccessor
   mlirOperationGetTypeID
   mlirOperationHasInherentAttributeByName
+  mlirOperationHashValue
   mlirOperationImplementsInterface
   mlirOperationImplementsInterfaceStatic
+  mlirOperationIsBeforeInBlock
   mlirOperationMoveAfter
   mlirOperationMoveBefore
   mlirOperationPrint
@@ -664,6 +685,7 @@ EXPORTS
   mlirOperationSetAttributeByName
   mlirOperationSetDiscardableAttributeByName
   mlirOperationSetInherentAttributeByName
+  mlirOperationSetLocation
   mlirOperationSetOperand
   mlirOperationSetOperands
   mlirOperationSetSuccessor
@@ -682,9 +704,19 @@ EXPORTS
   mlirPDLOperationTypeGet
   mlirPDLPatternModuleDestroy
   mlirPDLPatternModuleFromModule
+  mlirPDLPatternModuleRegisterConstraintFunction
+  mlirPDLPatternModuleRegisterRewriteFunction
   mlirPDLRangeTypeGet
   mlirPDLRangeTypeGetElementType
+  mlirPDLResultListPushBackAttribute
+  mlirPDLResultListPushBackOperation
+  mlirPDLResultListPushBackType
+  mlirPDLResultListPushBackValue
   mlirPDLTypeTypeGet
+  mlirPDLValueAsAttribute
+  mlirPDLValueAsOperation
+  mlirPDLValueAsType
+  mlirPDLValueAsValue
   mlirPDLValueTypeGet
   mlirParsePassPipeline
   mlirPassManagerAddOwnedPass
@@ -692,10 +724,13 @@ EXPORTS
   mlirPassManagerCreateOnOperation
   mlirPassManagerDestroy
   mlirPassManagerEnableIRPrinting
+  mlirPassManagerEnableStatistics
+  mlirPassManagerEnableTiming
   mlirPassManagerEnableVerifier
   mlirPassManagerGetAsOpPassManager
   mlirPassManagerGetNestedUnder
   mlirPassManagerRunOnOp
+  mlirPatternRewriterAsBase
   mlirPrintPassPipeline
   mlirRankedTensorTypeGet
   mlirRankedTensorTypeGetChecked
@@ -713,6 +748,9 @@ EXPORTS
   mlirRegionTakeBody
   mlirRegisterGPUPasses
   mlirRegisterLinalgPasses
+  mlirRewritePatternSetAdd
+  mlirRewritePatternSetCreate
+  mlirRewritePatternSetDestroy
   mlirRewritePatternSetFromPDLPatternModule
   mlirRewriterBaseCancelOpModification
   mlirRewriterBaseClearInsertionPoint
@@ -726,6 +764,7 @@ EXPORTS
   mlirRewriterBaseGetBlock
   mlirRewriterBaseGetContext
   mlirRewriterBaseGetInsertionBlock
+  mlirRewriterBaseGetOperationAfterInsertion
   mlirRewriterBaseInlineBlockBefore
   mlirRewriterBaseInlineRegionBefore
   mlirRewriterBaseInsert
@@ -759,6 +798,9 @@ EXPORTS
   mlirShapedTypeIsDynamicDim
   mlirShapedTypeIsDynamicSize
   mlirShapedTypeIsDynamicStrideOrOffset
+  mlirShapedTypeIsStaticDim
+  mlirShapedTypeIsStaticSize
+  mlirShapedTypeIsStaticStrideOrOffset
   mlirSimplifyAffineExpr
   mlirSparseElementsAttrGetIndices
   mlirSparseElementsAttrGetTypeID
