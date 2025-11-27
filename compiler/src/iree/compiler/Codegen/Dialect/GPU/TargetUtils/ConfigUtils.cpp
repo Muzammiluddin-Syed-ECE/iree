@@ -379,7 +379,9 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
   // We need to clean it up and make it adjusting to different targets.
   // See https://github.com/iree-org/iree/issues/16341 for details.
   int64_t mSize = ShapedType::getNumElements(problem.mSizes);
+  llvm::errs() << "mSize: " << mSize << "\n";
   int64_t nSize = ShapedType::getNumElements(problem.nSizes);
+  llvm::errs() << "nSize: " << nSize << "\n";
   int64_t kSize = ShapedType::getNumElements(problem.kSizes);
 
   int64_t flops = (2 * mSize * nSize * kSize);
@@ -393,6 +395,8 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
   }
   int64_t computeIntensity = flops / bytes;
 
+  llvm::errs() << "kSize: " << kSize << "\n";
+  llvm::errs() << "computeIntensity: " << computeIntensity << "\n";
   if (computeIntensity <= gemmCutoffs.smallGemmCutoff) {
     // For matmuls with small arithmetic intensity, use small
     // bestMNTileCountPerSubgroup and large bestKTileCountPerSubgroup.
@@ -408,12 +412,14 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
     problem.gemmSize = GemmSize::MediumGemm;
   }
   LDBG() << "This config is " << problem.gemmSize;
+  llvm::errs() << "This config is " << problem.gemmSize << "\n";
   std::optional<GPUMMAHeuristicSeeds> maybeSeeds =
       getContractionHeuristicSeeds(problem, isGemm, scaled);
   assert(maybeSeeds.has_value() && "expected seeds to be found");
   GPUMMAHeuristicSeeds seeds = maybeSeeds.value();
 
   int64_t maxSharedMemoryBytes = target.getWgp().getMaxWorkgroupMemoryBytes();
+  llvm::errs() << "maxSharedMemoryBytes: " << maxSharedMemoryBytes << "\n";
 
   std::optional<int64_t> wgpCount = std::nullopt;
   if (TargetChipAttr chip = target.getChip()) {
@@ -425,6 +431,7 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
       problem, intrinsics, seeds, maxSharedMemoryBytes, targetSubgroupSize,
       wgpCount, transposedLhs, transposedRhs, /*canUpcastAcc=*/false,
       /*mustBeAligned=*/mustBeAligned, doCPromotion, splitReductionTripCnt);
+  llvm::errs() << "schedule: " << schedule << "\n";
   return schedule;
 }
 
