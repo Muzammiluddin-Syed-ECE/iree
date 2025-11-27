@@ -288,10 +288,10 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
     assert(false && "Unhandled gemm size");
     break;
   }
-  reshapedSeeds.bestSubgroupCountPerWorkgroup = 4;
-  reshapedSeeds.bestMNTileCountPerSubgroup = 64;
-  reshapedSeeds.bestKTileCountPerSubgroup = 2;
-  reshapedSeeds.bestKElementCountPerSubgroup = 256;
+  // reshapedSeeds.bestSubgroupCountPerWorkgroup = 4;
+  // reshapedSeeds.bestMNTileCountPerSubgroup = 64;
+  // reshapedSeeds.bestKTileCountPerSubgroup = 2;
+  // reshapedSeeds.bestKElementCountPerSubgroup = 256;
   return reshapedSeeds;
 }
 
