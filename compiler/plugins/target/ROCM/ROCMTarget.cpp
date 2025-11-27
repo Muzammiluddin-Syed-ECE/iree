@@ -30,6 +30,7 @@
 #include "iree/compiler/PluginAPI/Client.h"
 #include "iree/compiler/Utils/EmbeddedDataDirectory.h"
 #include "iree/compiler/Utils/FlatbufferUtils.h"
+#include "iree/compiler/Utils/RemarkUtils.h"
 #include "iree/compiler/Utils/ToolUtils.h"
 #include "iree/schemas/amdgpu_executable_def_builder.h"
 #include "iree/schemas/hip_executable_def_builder.h"
@@ -281,12 +282,18 @@ static void checkRegisterSpilling(IREE::HAL::ExecutableVariantOp &variantOp,
   if (!llvm::offloading::amdgpu::getAMDGPUMetaDataFromImage(
           llvm::MemoryBufferRef(obj, ""), infoMap, abiVersion)) {
     for (const auto &[dispatchName, metaData] : infoMap) {
+      // Emit analysis remark for all kernels
+      RemarkUtils::emitRegisterUsageRemark(
+          variantOp.getLoc(), "ROCM", dispatchName, 
+          metaData.VGPRCount, metaData.SGPRCount,
+          metaData.VGPRSpillCount, metaData.SGPRSpillCount,
+          metaData.SharedMemorySize);
+
+      // Emit warning remark if spilling detected
       if (metaData.SGPRSpillCount > 0 || metaData.VGPRSpillCount > 0) {
-        emitWarning(variantOp.getLoc())
-            << "Register spill: " << "VGPRSpillCount: "
-            << metaData.VGPRSpillCount
-            << " / SGPRSpillCount: " << metaData.SGPRSpillCount
-            << " / Dispatch: " << dispatchName;
+        RemarkUtils::emitRegisterSpillingWarning(
+            variantOp.getLoc(), "ROCM", dispatchName,
+            metaData.VGPRSpillCount, metaData.SGPRSpillCount);
       }
     }
   }
@@ -469,7 +476,8 @@ public:
   static void optimizeModule(llvm::Module &module,
                              llvm::TargetMachine &targetMachine,
                              bool slpVectorization,
-                             std::string &outPassesString) {
+                             std::string &outPassesString,
+                             Location loc) {
     llvm::LoopAnalysisManager lam;
     llvm::FunctionAnalysisManager fam;
     llvm::CGSCCAnalysisManager cgam;
@@ -504,6 +512,14 @@ public:
       return passName.empty() ? className : passName;
     });
     mpm.run(module, mam);
+
+    // Emit remark for optimization pipeline execution
+    RemarkUtils::emitOptimizationPipelineRemark(
+        loc, "ROCM", module.getName().str(), "O2", outPassesString,
+        [slpVectorization](remark::InFlightRemark &r) {
+          r << remark::metric("SLPVectorization",
+                              slpVectorization ? "enabled" : "disabled");
+        });
   }
 
   LogicalResult
@@ -767,7 +783,7 @@ public:
       // Run LLVM optimization passes.
       std::string passesString;
       optimizeModule(*llvmModule, *targetMachine, options.slpVectorization,
-                     passesString);
+                     passesString, variantOp.getLoc());
       if (!serializationOptions.dumpIntermediatesPath.empty()) {
         // Additional context on '-mcpu' flag in PR comments, see for example:
         // https://github.com/iree-org/iree/pull/20716#issuecomment-2851650421
@@ -817,15 +833,31 @@ public:
       if (targetHSACO.empty())
         return failure();
 
+      // Emit success remark for serialization
+      RemarkUtils::emitSerializationSuccessRemark(
+          variantOp.getLoc(), "ROCM", libraryName, targetHSACO.size(),
+          targetArch, [isWave64](remark::InFlightRemark &r) {
+            r << remark::metric("WavefrontSize", isWave64 ? 64 : 32);
+          });
+
       if (options.enableRegSpillWarning) {
         checkRegisterSpilling(variantOp, targetObj);
       }
     }
 
     if (!serializationOptions.dumpBinariesPath.empty()) {
+      std::string filename = llvm::formatv(
+          "{0}_{1}.hsaco", serializationOptions.dumpBaseName,
+          variantOp.getName()).str();
       dumpDataToPath(serializationOptions.dumpBinariesPath,
                      serializationOptions.dumpBaseName, variantOp.getName(),
                      ".hsaco", targetHSACO);
+      
+      // Emit remark for binary dump
+      RemarkUtils::emitBinaryDumpRemark(
+          variantOp.getLoc(), "ROCM", libraryName,
+          serializationOptions.dumpBinariesPath, filename,
+          targetHSACO.size(), "HSACO");
     }
 
     // Determine container type from the target ABI attribute.

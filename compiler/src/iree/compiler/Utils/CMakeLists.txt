@@ -28,6 +28,7 @@ iree_cc_library(
     "PatternUtils.h"
     "Permutation.h"
     "RegionOpUtils.h"
+    "RemarkUtils.h"
     "ShapeUtils.h"
     "StringUtils.h"
     "ToolUtils.h"
@@ -41,6 +42,7 @@ iree_cc_library(
     "OptionUtils.cpp"
     "PassUtils.cpp"
     "RegionOpUtils.cpp"
+    "RemarkUtils.cpp"
     "ShapeUtils.cpp"
     "StringUtils.cpp"
     "ToolUtils.cpp"
@@ -56,6 +58,7 @@ iree_cc_library(
     MLIRIR
     MLIRParser
     MLIRPass
+    MLIRRemark
     MLIRSupport
     MLIRTransformUtils
     MLIRTransforms

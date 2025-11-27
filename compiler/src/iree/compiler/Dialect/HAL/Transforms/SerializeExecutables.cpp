@@ -12,6 +12,7 @@
 #include "iree/compiler/Dialect/HAL/Target/TargetBackend.h"
 #include "iree/compiler/Dialect/HAL/Target/TargetRegistry.h"
 #include "iree/compiler/Dialect/HAL/Transforms/Passes.h"
+#include "iree/compiler/Utils/RemarkUtils.h"
 #include "iree/compiler/Utils/TracingUtils.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/FileSystem.h"
@@ -77,6 +78,13 @@ struct SerializeTargetExecutablesPass
 
     auto variantOps = llvm::to_vector(
         executableOp.getBlock().getOps<IREE::HAL::ExecutableVariantOp>());
+    
+    // Emit remark for serialization start
+    RemarkUtils::emitExecutableSerializationStartRemark(
+        executableOp.getLoc(), executableOp.getName(), target, debugLevel,
+        variantOps.size());
+
+    size_t processedCount = 0;
     for (auto variantOp : variantOps) {
       if (variantOp.getTarget().getBackend().getValue() != target)
         continue;
@@ -91,7 +99,12 @@ struct SerializeTargetExecutablesPass
         return signalPassFailure();
       }
       variantOp.erase();
+      ++processedCount;
     }
+
+    // Emit remark for serialization completion
+    RemarkUtils::emitExecutableSerializationCompleteRemark(
+        executableOp.getLoc(), executableOp.getName(), target, processedCount);
   }
 };
 
