@@ -245,45 +245,54 @@ static GemmCutoff computeGemmCutoffsForAI(IREE::GPU::TargetAttr target,
 
 static std::optional<GPUMMAHeuristicSeeds>
 getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
+  GPUMMAHeuristicSeeds reshapedSeeds;
   switch (gemmSize) {
   case GemmSize::SmallGemm:
-    return GPUMMAHeuristicSeeds(
+    reshapedSeeds = GPUMMAHeuristicSeeds(
         {/*bestSubgroupCountPerWorkgroup=*/2,
          /*bestMNTileCountPerSubgroup=*/2,
          /*bestKTileCountPerSubgroup=*/4,
          /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits / inBitWidth});
+    break;
   case GemmSize::MediumGemm:
     if (scaled) {
-      return GPUMMAHeuristicSeeds(
+      reshapedSeeds = GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/8,
            /*bestMNTileCountPerSubgroup=*/32,
            /*bestKTileCountPerSubgroup=*/4,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
                inBitWidth});
     }
-    return GPUMMAHeuristicSeeds(
+    reshapedSeeds = GPUMMAHeuristicSeeds(
         {/*bestSubgroupCountPerWorkgroup=*/4,
          /*bestMNTileCountPerSubgroup=*/8,
          /*bestKTileCountPerSubgroup=*/4,
          /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits / inBitWidth});
+    break;
   case GemmSize::LargeGemm:
     if (scaled) {
-      return GPUMMAHeuristicSeeds(
+      reshapedSeeds = GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/8,
            /*bestMNTileCountPerSubgroup=*/32,
            /*bestKTileCountPerSubgroup=*/2,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
                inBitWidth});
     }
-    return GPUMMAHeuristicSeeds(
+    reshapedSeeds = GPUMMAHeuristicSeeds(
         {/*bestSubgroupCountPerWorkgroup=*/4,
          /*bestMNTileCountPerSubgroup=*/16,
          /*bestKTileCountPerSubgroup=*/2,
          /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 / inBitWidth});
+    break;
   default:
     assert(false && "Unhandled gemm size");
-    return std::nullopt;
+    break;
   }
+  // reshapedSeeds.bestSubgroupCountPerWorkgroup = 4;
+  // reshapedSeeds.bestMNTileCountPerSubgroup = 64;
+  // reshapedSeeds.bestKTileCountPerSubgroup = 2;
+  // reshapedSeeds.bestKElementCountPerSubgroup = 256;
+  return reshapedSeeds;
 }
 
 static std::optional<GPUMMAHeuristicSeeds>
