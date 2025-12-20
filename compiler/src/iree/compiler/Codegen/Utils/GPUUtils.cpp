@@ -745,6 +745,80 @@ std::optional<SmallVector<int64_t>> getWmmaNativeVectorSize(Operation *op) {
   return std::nullopt;
 }
 
+static FailureOr<int64_t> getOperandBitwidth(IREE::Codegen::InnerTileDescAttrInterface intrinsic, int operandIndex) {
+  if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(intrinsic)) {
+    SmallVector<Type> elementTypes;
+    smma.getElementTypes(elementTypes);
+    return elementTypes[operandIndex].getIntOrFloatBitWidth();
+  } 
+  if (auto mma = dyn_cast<IREE::GPU::MMAAttr>(intrinsic)) {
+    auto [aType, bType, _] = mma.getABCElementTypes();
+    return operandIndex == IREE::GPU::kMMAOperandLhs ? aType.getIntOrFloatBitWidth() : bType.getIntOrFloatBitWidth();
+  }
+  return failure();
+}
+
+static FailureOr<int64_t> getKSize(IREE::Codegen::InnerTileDescAttrInterface intrinsic) {
+  if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(intrinsic)) {
+    llvm::errs() << "getKSize: " << getKSize(smma.getIntrinsic()) << "\n";
+    llvm::errs() << "getKbSize: " << getKbSize(smma.getIntrinsic()) << "\n";
+    return getKSize(smma.getIntrinsic()) * getKbSize(smma.getIntrinsic());
+  } 
+  if (auto mma = dyn_cast<IREE::GPU::MMAAttr>(intrinsic)) {
+    return getKSize(mma.getIntrinsic());
+  }
+  return failure();
+}
+
+static FailureOr<int64_t> getNumAccessElems(IREE::Codegen::InnerTileDescAttrInterface intrinsic, int operandIndex) {
+  IREE::GPU::MMASingleSubgroupLayout layout;
+  if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(intrinsic)) {
+    layout = IREE::GPU::getSingleSubgroupLayout(smma.getIntrinsic(), operandIndex);
+    return llvm::product_of(layout.element);
+  } 
+  if (auto mma = dyn_cast<IREE::GPU::MMAAttr>(intrinsic)) {
+    layout = IREE::GPU::getSingleSubgroupLayout(mma.getIntrinsic(), operandIndex);
+    return llvm::product_of(layout.element);
+  }
+  return failure();
+}
+
+FailureOr<std::pair<int64_t, int64_t>>
+getXORShuffleAttr(IREE::GPU::TargetAttr target,
+                  IREE::Codegen::InnerTileDescAttrInterface intrinsic,
+                  ArrayRef<int64_t> reductionTileSizes, int operandIndex) {
+  // Compute XOR shuffle swizzle parameters for bank conflict avoidance.
+  // - row_width: Select entirety of K Tile size, may not prevent bank
+  //              conflicts if the K tile size is too small.
+  // - access_width: number of contiguous elements each thread accesses,
+  //                 derived from the MMA intrinsic's element layout.
+  int64_t numAccessElems = getNumAccessElems(intrinsic, operandIndex).value();
+
+  // Calculate K tile size (total K elements in shared memory) to use as row
+  // width. For small K tiles, this may not reduce bank conflicts effectively.
+  int64_t kTileSize =
+      llvm::product_of(reductionTileSizes) * getKSize(intrinsic).value();
+  int64_t kTilePow2 = llvm::PowerOf2Ceil(kTileSize);
+
+  // Default to 64 banks for newer GPUs.
+  IREE::GPU::TargetWgpAttr wgp = target.getWgp();
+  FailureOr<int64_t> bitwidth = getOperandBitwidth(intrinsic, operandIndex);
+  if (failed(bitwidth)) {
+    return failure();
+  }
+  int64_t ldsBankWidthBits = (64 * 4 * 8)/bitwidth.value();
+  if (std::optional<int64_t> workgroupMemoryBankCount =
+          wgp.getWorkgroupMemoryBankCount()) {
+    ldsBankWidthBits = *workgroupMemoryBankCount * 4 * 8 / bitwidth.value();
+  }
+  // Row width must be less than or equal to the row size (in elements) of LDS
+  // bank width to prevent bank conflicts.
+  int64_t effectiveRowWidth = std::min(ldsBankWidthBits, kTilePow2);
+  // Ensure row width is at least access width (minimum 1 column).
+  effectiveRowWidth = std::max(effectiveRowWidth, numAccessElems);
+  return std::make_pair(effectiveRowWidth, numAccessElems);
+}
+
 //===----------------------------------------------------------------------===//
 // getMmaNativeVectorSize
 //===----------------------------------------------------------------------===//

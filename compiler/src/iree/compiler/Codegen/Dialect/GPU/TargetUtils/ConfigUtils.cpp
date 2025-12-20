@@ -743,7 +743,6 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     }
     batchDims.push_back(batchDim);
   }
-
   // Infer if lhs or rhs is transposed to help generate better schedule.
   // TODO: Drop this. This is only a consideration for other pipelines.
   bool transposedLhs =
@@ -841,7 +840,6 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   std::optional<GPUMMASchedule> schedule = getMmaScheduleFromProblemAndTarget(
       target, problem, loc, transposedLhs, transposedRhs, isGemm,
       /*mustBeAligned=*/true, doCPromotion, scaled, splitReductionTripCnt);
-
   if (!schedule && canSupportUnaligned) {
     LDBG() << "Attempting to deduce unaligned TileAndFuse MMA schedule";
     mustBeAligned = false;
@@ -935,9 +933,34 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     // TODO(#22119): We don't use global load DMA for scaled matmuls, because
     // compilation doesn't support it. Once this is fixed, we should use global
     // load DMA here when possible.
-    promotionArray = {};
     promotionList.append({2, 3});
+    // Compute XOR shuffle swizzle parameters for bank conflict avoidance.
+    // - row_width: Select entirety of K Tile size, may not prevent bank
+    //              conflicts if the K tile size is too small.
+    // - access_width: number of contiguous elements each thread accesses,
+    //                 derived from the MMA intrinsic's element layout.
+    auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
+    if (failed(getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandLhs)) || failed(getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandRhs))) {
+      return failure();
+    }
+    auto [lhsEffectiveRowWidth, lhsNumAccessElems] = getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandLhs).value();
+    auto [rhsEffectiveRowWidth, rhsNumAccessElems] = getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandRhs).value();
+    auto lhsSwizzleAttr = IREE::Codegen::XORShuffleAttr::get(
+        context, lhsEffectiveRowWidth, lhsNumAccessElems,
+        /*row_stride=*/int64_t(0),
+        /*per_phase=*/int64_t(0));
+    auto rhsSwizzleAttr = IREE::Codegen::XORShuffleAttr::get(
+        context, rhsEffectiveRowWidth, rhsNumAccessElems,
+        /*row_stride=*/int64_t(0),
+        /*per_phase=*/int64_t(0));
+    Attribute lhsSwizzleOperand = IREE::GPU::SwizzleOperandAttr::get(
+        context, defaultConfigAttr, lhsSwizzleAttr);
+    Attribute rhsSwizzleOperand = IREE::GPU::SwizzleOperandAttr::get(
+        context, defaultConfigAttr, rhsSwizzleAttr);
+    promotionArray = {lhsSwizzleOperand,
+                                            rhsSwizzleOperand, defaultConfigAttr, defaultConfigAttr};
   }
+
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {
     // If needed then add C operand which would be operand 2 or 4 for unscaled
     // and scaled GEMM respectively.
@@ -2160,7 +2183,8 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
     }
   }
 
-  return os << "{" << "enableReduceSharedMemoryBankConflicts = "
+  return os << "{"
+            << "enableReduceSharedMemoryBankConflicts = "
             << options.enableReduceSharedMemoryBankConflicts
             << ", prefetchNumStages = " << options.prefetchNumStages
             << ", useIgemmConvolution = " << options.useIgemmConvolution
