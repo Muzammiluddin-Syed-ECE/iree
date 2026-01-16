@@ -794,6 +794,8 @@ def IREEGPU_TargetChipAttr : AttrDef<IREEGPU_Dialect, "TargetChip"> {
     OptionalParameter<"FloatAttr">:$memory_bandwidth_tbps,
     // An optional performance dictionary in TFLOPS.
     OptionalParameter<"DictionaryAttr">:$perf_tflops,
+    // An optional width in bits across all shared memory banks.
+    OptionalParameter<"std::optional<int32_t>">:$shared_memory_bank_width_bits,
     // An optional extra dict
     // This field allows to inject more features/limits not supported in the
     // above list for better flexibility.
