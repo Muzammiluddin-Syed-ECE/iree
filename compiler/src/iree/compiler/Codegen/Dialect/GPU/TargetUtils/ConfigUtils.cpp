@@ -44,7 +44,6 @@ namespace mlir::iree_compiler::IREE::GPU {
 
 constexpr int64_t kCacheLineSizeBits = 128 * 8;
 constexpr int64_t kPreferredCopyNumBits = 128;
-constexpr int64_t kLDSBankWidthBits = 32 * 4 * 8;
 
 //===----------------------------------------------------------------------===//
 // Lowering Config Selection
@@ -943,8 +942,18 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
     int64_t lhsBitwidth = lhsElemType.getIntOrFloatBitWidth();
     int64_t rhsBitwidth = rhsElemType.getIntOrFloatBitWidth();
-    int64_t lhsNumRowElems = kLDSBankWidthBits / lhsBitwidth;
-    int64_t rhsNumRowElems = kLDSBankWidthBits / rhsBitwidth;
+
+    // Assuming 32 banks of 4 bytes each, each with 8 bits, if chip not
+    // specified.
+    int64_t ldsBankWidthBits = 32 * 4 * 8;
+    if (TargetChipAttr chip = target.getChip()) {
+      IntegerAttr sharedMemoryBankWidthBitsAttr = chip.getSharedMemoryBankWidthBits();
+      if (sharedMemoryBankWidthBitsAttr) {
+        ldsBankWidthBits = sharedMemoryBankWidthBitsAttr.getValue().getSExtValue();
+      }
+    }
+    int64_t lhsNumRowElems = ldsBankWidthBits / lhsBitwidth;
+    int64_t rhsNumRowElems = ldsBankWidthBits / rhsBitwidth;
     int64_t numAccessElems = schedule->kSizes.back();
     auto lhsSwizzleAttr = IREE::Codegen::XORShuffleAttr::get(
         context, lhsNumRowElems, numAccessElems, /*row_stride=*/int64_t(0),

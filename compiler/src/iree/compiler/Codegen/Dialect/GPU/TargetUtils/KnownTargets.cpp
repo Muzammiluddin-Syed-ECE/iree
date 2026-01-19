@@ -66,12 +66,15 @@ struct ChipDetails {
   std::optional<StringRef> sku;
   // Aggregate chip-level bandwidth in TB/s.
   std::optional<float> peakMemoryBandwidthTBs;
+  // Width in bits across all shared memory banks.
+  std::optional<int32_t> sharedMemoryBankWidthBits;
   // Optional per-data-type compute performance (TFLOPs/s).
   llvm::SmallDenseMap<ComputeBitwidths, float> peakPerfTFLOPs;
 
   ChipDetails(
       uint32_t wgp, std::optional<llvm::StringRef> s = std::nullopt,
       std::optional<float> bw = std::nullopt,
+      std::optional<int64_t> sharedMemoryBankWidthBits = std::nullopt,
       std::initializer_list<llvm::detail::DenseMapPair<ComputeBitwidths, float>>
           perf = {})
       : wgpCount(wgp), sku(s), peakMemoryBandwidthTBs(bw),
@@ -165,6 +168,11 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
                              *details.chip->peakMemoryBandwidthTBs)
             : FloatAttr{};
 
+    IntegerAttr sharedMemoryBankWidthBitsAttr =
+        details.chip->sharedMemoryBankWidthBits
+            ? IntegerAttr::get(IntegerType::get(context, 64), *details.chip->sharedMemoryBankWidthBits)
+            : IntegerAttr{};
+
     DictionaryAttr peakPerfTFLOPsAttr = {};
     if (!details.chip->peakPerfTFLOPs.empty()) {
       SmallVector<NamedAttribute> attributes = llvm::map_to_vector(
@@ -177,7 +185,7 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
     }
     targetChip = TargetChipAttr::get(context, details.chip->wgpCount, skuAttr,
                                      peakMemoryBandwidthAttr,
-                                     peakPerfTFLOPsAttr, DictionaryAttr{});
+                                     peakPerfTFLOPsAttr, sharedMemoryBankWidthBitsAttr, DictionaryAttr{});
   }
 
   return TargetAttr::get(context, arch, features, targetWgp, targetChip);
