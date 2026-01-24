@@ -933,16 +933,11 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   int64_t lhsBitwidth = lhsElemType.getIntOrFloatBitWidth();
   int64_t rhsBitwidth = rhsElemType.getIntOrFloatBitWidth();
 
-  // LDS bank configuration varies by GPU:
-  // - MI100/MI200 (gfx908/gfx90a): 32 banks * 4 bytes = 128 bytes = 1024 bits
-  // - MI300/MI350 (gfx942/gfx950): 64 banks * 4 bytes = 256 bytes = 2048 bits
-  // Default to 64 banks for newer GPUs (gfx9xx).
+  // Default to 64 banks for newer GPUs.
+  IREE::GPU::TargetWgpAttr wgp = target.getWgp();
   int64_t ldsBankWidthBits = 64 * 4 * 8;  // 2048 bits for MI350
-  if (TargetChipAttr chip = target.getChip()) {
-    IntegerAttr sharedMemoryBankWidthBitsAttr = chip.getSharedMemoryBankWidthBits();
-    if (sharedMemoryBankWidthBitsAttr) {
-      ldsBankWidthBits = sharedMemoryBankWidthBitsAttr.getValue().getSExtValue();
-    }
+  if (std::optional<int64_t> sharedMemoryBankWidthBits = wgp.getSharedMemoryBankWidthBits()) {
+    ldsBankWidthBits = *sharedMemoryBankWidthBits;
   }
 
   // row_width = number of elements that fill all cache lines

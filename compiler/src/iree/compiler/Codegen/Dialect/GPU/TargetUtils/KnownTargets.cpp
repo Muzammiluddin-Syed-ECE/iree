@@ -66,15 +66,12 @@ struct ChipDetails {
   std::optional<StringRef> sku;
   // Aggregate chip-level bandwidth in TB/s.
   std::optional<float> peakMemoryBandwidthTBs;
-  // Width in bits across all shared memory banks.
-  std::optional<int32_t> sharedMemoryBankWidthBits;
   // Optional per-data-type compute performance (TFLOPs/s).
   llvm::SmallDenseMap<ComputeBitwidths, float> peakPerfTFLOPs;
 
   ChipDetails(
       uint32_t wgp, std::optional<llvm::StringRef> s = std::nullopt,
       std::optional<float> bw = std::nullopt,
-      std::optional<int64_t> sharedMemoryBankWidthBits = std::nullopt,
       std::initializer_list<llvm::detail::DenseMapPair<ComputeBitwidths, float>>
           perf = {})
       : wgpCount(wgp), sku(s), peakMemoryBandwidthTBs(bw),
@@ -168,11 +165,6 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
                              *details.chip->peakMemoryBandwidthTBs)
             : FloatAttr{};
 
-    IntegerAttr sharedMemoryBankWidthBitsAttr =
-        details.chip->sharedMemoryBankWidthBits
-            ? IntegerAttr::get(IntegerType::get(context, 64), *details.chip->sharedMemoryBankWidthBits)
-            : IntegerAttr{};
-
     DictionaryAttr peakPerfTFLOPsAttr = {};
     if (!details.chip->peakPerfTFLOPs.empty()) {
       SmallVector<NamedAttribute> attributes = llvm::map_to_vector(
@@ -185,7 +177,7 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
     }
     targetChip = TargetChipAttr::get(context, details.chip->wgpCount, skuAttr,
                                      peakMemoryBandwidthAttr,
-                                     peakPerfTFLOPsAttr, sharedMemoryBankWidthBitsAttr, DictionaryAttr{});
+                                     peakPerfTFLOPsAttr, DictionaryAttr{});
   }
 
   return TargetAttr::get(context, arch, features, targetWgp, targetChip);
@@ -534,7 +526,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi350xChip = {256,
                                          "mi350x",
                                          8.0f,
-                                         1024,
                                          {{ComputeBitwidths::FP32, 144.2f},
                                           {ComputeBitwidths::FP16, 2300.0f},
                                           {ComputeBitwidths::Int8, 4600.0f},
@@ -545,7 +536,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi355xChip = {256,
                                          "mi355x",
                                          8.0f,
-                                         2048,
                                          {{ComputeBitwidths::FP32, 157.3f},
                                           {ComputeBitwidths::FP16, 2500.0f},
                                           {ComputeBitwidths::Int8, 5000.0f},
@@ -558,7 +548,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi300xChip = {304,
                                          "mi300x",
                                          5.3f,
-                                         1024,
                                          {{ComputeBitwidths::FP32, 163.4f},
                                           {ComputeBitwidths::FP16, 1307.4f},
                                           {ComputeBitwidths::Int8, 2614.9f},
@@ -567,7 +556,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi300aChip = {228,
                                          "mi300a",
                                          5.3f,
-                                         1024,
                                          {{ComputeBitwidths::FP32, 122.6f},
                                           {ComputeBitwidths::FP16, 980.6f},
                                           {ComputeBitwidths::Int8, 1961.2f},
@@ -577,7 +565,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
       80,
       "mi308x",
       5.3f,
-      1024,
       // Peak fp32 perf estimated from:
       // 80(CUs)*4(SIMDs)*1.42(Freq)*(16*16*4)(GEMM shape)*2(mul+add)/32(latency
       // instruction)
@@ -590,7 +577,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi325xChip = {304,
                                          "mi325x",
                                          5.3f,
-                                         1024,
                                          {{ComputeBitwidths::FP32, 163.4f},
                                           {ComputeBitwidths::FP16, 1307.4f},
                                           {ComputeBitwidths::Int8, 2614.9f},
@@ -601,7 +587,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi250xChip = {220,
                                          "mi250x",
                                          3.2f,
-                                         1024,
                                          {{ComputeBitwidths::FP32, 95.7f},
                                           {ComputeBitwidths::FP16, 383.0f},
                                           {ComputeBitwidths::Int8, 383.0f}}};
@@ -609,14 +594,12 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi250Chip = {208,
                                         "mi250",
                                         3.2f,
-                                        1024,
                                         {{ComputeBitwidths::FP32, 90.5f},
                                          {ComputeBitwidths::FP16, 362.1f},
                                          {ComputeBitwidths::Int8, 362.1f}}};
   static const ChipDetails mi210Chip = {104,
                                         "mi210",
                                         1.6f,
-                                        1024,
                                         {{ComputeBitwidths::FP32, 45.3f},
                                          {ComputeBitwidths::FP16, 181.0f},
                                          {ComputeBitwidths::Int8, 181.0f}}};
@@ -626,7 +609,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails mi100Chip = {120,
                                         "mi100",
                                         1.23f,
-                                        1024,
                                         {{ComputeBitwidths::FP32, 46.1f},
                                          {ComputeBitwidths::FP16, 184.6f},
                                          {ComputeBitwidths::Int8, 184.6f}}};
@@ -646,7 +628,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails r9700Chip = {64 / 2,
                                         "r9700",
                                         0.64f,
-                                        2048,
                                         {{ComputeBitwidths::FP32, 47.8f},
                                          {ComputeBitwidths::FP16, 191.0f},
                                          {ComputeBitwidths::Int8, 383.0f},
@@ -655,7 +636,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails rx9070xtChip = {64 / 2,
                                            "rx9070xt",
                                            0.64f,
-                                           2048,
                                            {{ComputeBitwidths::FP32, 48.7f},
                                             {ComputeBitwidths::FP16, 195.0f},
                                             {ComputeBitwidths::Int8, 389.0f},
@@ -664,7 +644,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails rx9070Chip = {56 / 2,
                                          "rx9070",
                                          0.64f,
-                                         2048,
                                          {{ComputeBitwidths::FP32, 36.1f},
                                           {ComputeBitwidths::FP16, 145.0f},
                                           {ComputeBitwidths::Int8, 289.0f},
@@ -673,7 +652,6 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   static const ChipDetails rx9060xtChip = {32 / 2,
                                            "rx9060xt",
                                            0.32f,
-                                           2048,
                                            {{ComputeBitwidths::FP32, 25.6f},
                                             {ComputeBitwidths::FP16, 103.0f},
                                             {ComputeBitwidths::Int8, 205.0f},
