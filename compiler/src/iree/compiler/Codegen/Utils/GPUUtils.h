@@ -9,6 +9,7 @@
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUInterfaces.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -175,6 +176,13 @@ Value getCombiningIdentityValue(Location loc, OpBuilder &builder,
 /// Returns the matching GPU reduction operation.
 mlir::gpu::AllReduceOperation
 combiningKindToAllReduce(vector::CombiningKind kind);
+
+/// Returns the XOR shuffle attribute for the given intrinsic and reduction tile
+/// size.
+FailureOr<std::pair<int64_t, int64_t>>
+getXORShuffleAttr(IREE::GPU::TargetAttr target,
+                  IREE::Codegen::InnerTileDescAttrInterface intrinsic,
+                  ArrayRef<int64_t> reductionTileSizes, int operandIndex);
 
 //===----------------------------------------------------------------------===//
 // GPU CodeGen op filter
