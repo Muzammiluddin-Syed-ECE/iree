@@ -925,12 +925,11 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
       {"mma_kind", kind}};
 
   // Compute XOR shuffle swizzle parameters for bank conflict avoidance.
-  // - row_width: computed from LDS bank width to ensure we swizzle across
-  //              all cache lines (32 banks * 4 bytes = 128 bytes = 1024 bits)
+  // - row_width: Select entirety of K Tile size, may not prevent bank
+  //              conflicts if the K tile size is too small.
   // - access_width: number of contiguous elements each thread accesses,
-  //                 derived from the MMA intrinsic's element layout
+  //                 derived from the MMA intrinsic's element layout.
   auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
-
   int64_t lhsBitwidth = lhsElemType.getIntOrFloatBitWidth();
   int64_t rhsBitwidth = rhsElemType.getIntOrFloatBitWidth();
 
