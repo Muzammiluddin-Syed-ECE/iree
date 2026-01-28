@@ -934,31 +934,18 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     // compilation doesn't support it. Once this is fixed, we should use global
     // load DMA here when possible.
     promotionList.append({2, 3});
-    // Compute XOR shuffle swizzle parameters for bank conflict avoidance.
-    // - row_width: Select entirety of K Tile size, may not prevent bank
-    //              conflicts if the K tile size is too small.
-    // - access_width: number of contiguous elements each thread accesses,
-    //                 derived from the MMA intrinsic's element layout.
     auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
-    if (failed(getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandLhs)) || failed(getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandRhs))) {
+    FailureOr<Attribute> lhsSwizzleAttr =
+        getXORShuffleAttr(context, defaultConfigAttr, target, kind,
+                          schedule->kTileSizes, kMMAOperandLhs);
+    FailureOr<Attribute> rhsSwizzleAttr =
+        getXORShuffleAttr(context, defaultConfigAttr, target, kind,
+                          schedule->kTileSizes, kMMAOperandRhs);
+    if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       return failure();
     }
-    auto [lhsEffectiveRowWidth, lhsNumAccessElems] = getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandLhs).value();
-    auto [rhsEffectiveRowWidth, rhsNumAccessElems] = getXORShuffleAttr(target, kind,  schedule->kTileSizes, kMMAOperandRhs).value();
-    auto lhsSwizzleAttr = IREE::Codegen::XORShuffleAttr::get(
-        context, lhsEffectiveRowWidth, lhsNumAccessElems,
-        /*row_stride=*/int64_t(0),
-        /*per_phase=*/int64_t(0));
-    auto rhsSwizzleAttr = IREE::Codegen::XORShuffleAttr::get(
-        context, rhsEffectiveRowWidth, rhsNumAccessElems,
-        /*row_stride=*/int64_t(0),
-        /*per_phase=*/int64_t(0));
-    Attribute lhsSwizzleOperand = IREE::GPU::SwizzleOperandAttr::get(
-        context, defaultConfigAttr, lhsSwizzleAttr);
-    Attribute rhsSwizzleOperand = IREE::GPU::SwizzleOperandAttr::get(
-        context, defaultConfigAttr, rhsSwizzleAttr);
-    promotionArray = {lhsSwizzleOperand,
-                                            rhsSwizzleOperand, defaultConfigAttr, defaultConfigAttr};
+    promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, defaultConfigAttr,
+                      defaultConfigAttr};
   }
 
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {
