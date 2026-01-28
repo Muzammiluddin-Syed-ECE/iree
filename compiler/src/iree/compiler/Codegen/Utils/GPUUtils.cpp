@@ -810,16 +810,6 @@ getTotalTileElems(IREE::Codegen::InnerTileDescAttrInterface intrinsic,
   return failure();
 }
 
-/// For a given MMA intrinsic and operand, returns the lower bound and upper
-/// bound for valid values of XOR shuffle attribute parameters, access width and
-/// row width. For both parameters, the elements ingested per thread at a time
-/// is used as the minimum bound and the total number of elements in the tile is
-/// used as the upper bound. Note that if you want to do a sweep over valid XOR
-/// swizzles, this is how the sweep should be done:
-/// - sweep access width over all multiples of the minimum bound, respecting the
-/// upper bound.
-/// - sweep row width over all multiple of the access width, respecting the
-/// upper bound.
 FailureOr<std::pair<int64_t, int64_t>>
 getXORShuffleBounds(IREE::Codegen::InnerTileDescAttrInterface intrinsic,
                     int operandIndex) {
@@ -833,8 +823,6 @@ getXORShuffleBounds(IREE::Codegen::InnerTileDescAttrInterface intrinsic,
   return std::make_pair(*maybeMinimumAccessElems, *maybeTotalTileElems);
 }
 
-/// Returns true if the XOR shuffle is valid for the given number of row
-/// elements, number of access elements, and total tile elements.
 bool isXORShuffleValid(int64_t numRowElems, int64_t numAccessElems,
                        int64_t totalTileElems) {
   // The number of total tile elements we want to swizzle must be greater than
@@ -913,8 +901,6 @@ FailureOr<std::pair<int64_t, int64_t>> getXORShuffleParamsForTunedChipset(
   return failure();
 }
 
-/// Note this generic heuristic for untuned cases is not guaranteed to be
-/// optimal for all targets and intrinsics.
 FailureOr<std::pair<int64_t, int64_t>> getXORShuffleParamsForUntunedChipset(
     IREE::GPU::TargetAttr target,
     IREE::Codegen::InnerTileDescAttrInterface intrinsic,
