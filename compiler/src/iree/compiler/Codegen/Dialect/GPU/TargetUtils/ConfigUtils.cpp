@@ -743,6 +743,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     }
     batchDims.push_back(batchDim);
   }
+
   // Infer if lhs or rhs is transposed to help generate better schedule.
   // TODO: Drop this. This is only a consideration for other pipelines.
   bool transposedLhs =
@@ -840,6 +841,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   std::optional<GPUMMASchedule> schedule = getMmaScheduleFromProblemAndTarget(
       target, problem, loc, transposedLhs, transposedRhs, isGemm,
       /*mustBeAligned=*/true, doCPromotion, scaled, splitReductionTripCnt);
+
   if (!schedule && canSupportUnaligned) {
     LDBG() << "Attempting to deduce unaligned TileAndFuse MMA schedule";
     mustBeAligned = false;
@@ -933,6 +935,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     // TODO(#22119): We don't use global load DMA for scaled matmuls, because
     // compilation doesn't support it. Once this is fixed, we should use global
     // load DMA here when possible.
+
     promotionList.append({2, 3});
     auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
     FailureOr<Attribute> lhsSwizzleAttr =
@@ -947,7 +950,6 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, defaultConfigAttr,
                       defaultConfigAttr};
   }
-
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {
     // If needed then add C operand which would be operand 2 or 4 for unscaled
     // and scaled GEMM respectively.
@@ -2170,8 +2172,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
     }
   }
 
-  return os << "{"
-            << "enableReduceSharedMemoryBankConflicts = "
+  return os << "{" << "enableReduceSharedMemoryBankConflicts = "
             << options.enableReduceSharedMemoryBankConflicts
             << ", prefetchNumStages = " << options.prefetchNumStages
             << ", useIgemmConvolution = " << options.useIgemmConvolution
