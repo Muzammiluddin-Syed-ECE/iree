@@ -225,3 +225,62 @@ module {
 }
 // CHECK-LABEL: func @test_lane_increment_step_and_aligned
 //  CHECK-SAME:   lane_increment = #iree_gpu.lane_increment<64, step = 2, aligned>
+
+// -----
+// Mega-intrinsic tests
+// -----
+
+module {
+  func.func @test_mega_intrinsic_basic() attributes {
+      mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>} {
+    return
+  }
+}
+// CHECK-LABEL: func @test_mega_intrinsic_basic
+//  CHECK-SAME:   mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>
+
+module {
+  func.func @test_mega_intrinsic_with_k_repeats() attributes {
+      mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [1, 1, 2]>} {
+    return
+  }
+}
+// CHECK-LABEL: func @test_mega_intrinsic_with_k_repeats
+//  CHECK-SAME:   mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [1, 1, 2]>
+
+module {
+  func.func @test_mega_intrinsic_32x32x8() attributes {
+      mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_32x32x8_F16, repeats = [2, 1, 2]>} {
+    return
+  }
+}
+// CHECK-LABEL: func @test_mega_intrinsic_32x32x8
+//  CHECK-SAME:   mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_32x32x8_F16, repeats = [2, 1, 2]>
+
+module {
+  func.func @test_mma_with_mega_intrinsic() attributes {
+      mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, col_major = false, mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>>} {
+    return
+  }
+}
+// CHECK-LABEL: func @test_mma_with_mega_intrinsic
+//  CHECK-SAME:   mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, mega = <intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>>
+
+module {
+  func.func @test_mma_col_major_with_mega_intrinsic() attributes {
+      mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, col_major = true, mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>>} {
+    return
+  }
+}
+// CHECK-LABEL: func @test_mma_col_major_with_mega_intrinsic
+//  CHECK-SAME:   mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, col_major = true, mega = <intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>>
+
+module {
+  func.func @test_mega_intrinsic_mxfp4_scales() attributes {
+      mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x128_F8E4M3FN, repeats = [1, 1, 4]>} {
+    return
+  }
+}
+// CHECK-LABEL: func @test_mega_intrinsic_mxfp4_scales
+//  CHECK-SAME:   mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x128_F8E4M3FN, repeats = [1, 1, 4]>
+

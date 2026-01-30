@@ -246,6 +246,69 @@ class IREEGPU_MmaEnumAttr<EnumAttrInfo enumInfo, string name = "">
 def IREEGPU_MMAIntrinsicAttr
   : IREEGPU_MmaEnumAttr<IREEGPU_MMAIntrinsic, "mma_intrinsic">;
 
+//===----------------------------------------------------------------------===//
+// MegaIntrinsic - Grouping of multiple hardware intrinsics
+//===----------------------------------------------------------------------===//
+
+def IREEGPU_MegaIntrinsicAttr : AttrDef<IREEGPU_Dialect, "MegaIntrinsic", []> {
+  let mnemonic = "mega_intrinsic";
+  let cppNamespace = "::mlir::iree_compiler::IREE::GPU";
+
+  let description = [{
+    Attribute describing a grouping of multiple hardware MMA intrinsics to be
+    treated as a single logical unit. This allows flexible specification of
+    instruction scheduling patterns and can influence data layout decisions.
+
+    The |intrinsic| field specifies the base hardware MMA intrinsic to repeat.
+    
+    The |repeats| field specifies how many times to repeat the intrinsic along
+    the M, N, and K dimensions respectively. For example, repeats = [2, 2, 1]
+    means the mega-intrinsic is composed of 4 hardware intrinsics arranged in
+    a 2x2 pattern (2 along M, 2 along N, 1 along K).
+
+    Example:
+    ```
+    #iree_gpu.mega_intrinsic<
+      intrinsic = <MFMA_F32_16x16x16_F16>,
+      repeats = [2, 2, 1]
+    >
+    ```
+    This represents a logical 32x32x16 MMA operation composed of 4 physical
+    16x16x16 MFMA instructions.
+
+    This mechanism generalizes the current VMMA (Virtual MMA) functionality,
+    which hard-codes specific patterns. By allowing flexible |repeats|
+    parameters, it supports:
+    - Custom instruction scheduling patterns
+    - Better load/compute interleaving
+    - Specialized data layouts (e.g., for scales in MXFP4)
+    - Backend-specific optimizations without modifying core infrastructure
+  }];
+
+  let parameters = (ins
+    EnumParameter<IREEGPU_MMAIntrinsic>:$intrinsic,
+    AttrParameter<"DenseI64ArrayAttr", "Repeat counts for M, N, K dimensions">:$repeats
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns the effective MNK shape after applying repeats.
+    std::tuple<int64_t, int64_t, int64_t> getEffectiveMNKShape() const;
+
+    /// Returns the base intrinsic's MNK shape.
+    std::tuple<int64_t, int64_t, int64_t> getBaseIntrinsicMNKShape() const;
+
+    /// Returns the number of hardware intrinsics in this mega-intrinsic.
+    int64_t getNumPhysicalIntrinsics() const;
+
+    /// Returns the repeats as a vector.
+    SmallVector<int64_t> getRepeatsArray() const;
+  }];
+
+  let genVerifyDecl = 1;
+}
+
 def IREEGPU_MMAAttr : AttrDef<IREEGPU_Dialect, "MMA", [
   DeclareAttrInterfaceMethods<IREEGPU_MmaInterfaceAttr, [
     "getSubgroupSize",
@@ -285,23 +348,33 @@ def IREEGPU_MMAAttr : AttrDef<IREEGPU_Dialect, "MMA", [
     ```
       C^T += B^T x A^T
     ```
+
+    The optional |mega_intrinsic| field allows specifying this MMA operation as
+    a grouping of multiple hardware intrinsics, providing flexible control over
+    instruction scheduling and data layout.
   }];
 
   let parameters = (ins
     EnumParameter<IREEGPU_MMAIntrinsic>:$intrinsic,
-    DefaultValuedParameter<"bool", "false">:$col_major
+    DefaultValuedParameter<"bool", "false">:$col_major,
+    OptionalParameter<"MegaIntrinsicAttr">:$mega_intrinsic
   );
 
-  let assemblyFormat = "`<` $intrinsic (`,` `col_major` `=` $col_major^)? `>`";
+  let assemblyFormat = "`<` $intrinsic (`,` `col_major` `=` $col_major^)? (`,` `mega` `=` $mega_intrinsic^)? `>`";
 
   let builders = [
-    AttrBuilder<(ins "MMAIntrinsic":$intrinsic)>
+    AttrBuilder<(ins "MMAIntrinsic":$intrinsic)>,
+    AttrBuilder<(ins "MMAIntrinsic":$intrinsic, "bool":$colMajor)>,
+    AttrBuilder<(ins "MMAIntrinsic":$intrinsic, "MegaIntrinsicAttr":$megaIntrinsic)>
   ];
 
   let extraClassDeclaration = [{
     int64_t getBlockSize() const;
 
     SmallVector<VirtualMMAIntrinsic> getVirtualIntrinsics() const;
+
+    /// Returns the effective MNK shape, accounting for mega-intrinsic if present.
+    std::tuple<int64_t, int64_t, int64_t> getEffectiveMNKShape() const;
   }];
 }
 
