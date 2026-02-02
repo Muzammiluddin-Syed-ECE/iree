@@ -642,6 +642,51 @@ NB_MODULE(_ireeCompilerDialects, m) {
       py::arg("attr"), py::arg("fragment"));
 
   //===-------------------------------------------------------------------===//
+  // Binding to utility function getXorShuffleBounds
+  //===-------------------------------------------------------------------===//
+
+  iree_gpu_module.def(
+      "get_xor_shuffle_bounds",
+      [](MlirAttribute intrinsic,
+         int operandIndex) -> std::optional<std::pair<int64_t, int64_t>> {
+        int64_t minBound = 0;
+        int64_t maxBound = 0;
+        if (ireeGPUGetXorShuffleBounds(intrinsic, operandIndex, &minBound,
+                                       &maxBound)) {
+          return std::make_pair(minBound, maxBound);
+        }
+        return std::nullopt;
+      },
+      "Returns the lower and upper bounds for valid XOR shuffle attribute "
+      "parameters for a given MMA intrinsic and operand index. "
+      "Returns a tuple (min_bound, max_bound) if successful, None otherwise.",
+      py::arg("intrinsic"), py::arg("operand_index"));
+
+  //===-------------------------------------------------------------------===//
+  // Binding to utility function isXORShuffleValid
+  //===-------------------------------------------------------------------===//
+
+  iree_gpu_module.def(
+      "is_xor_shuffle_valid",
+      [](int64_t numRowElems, int64_t numAccessElems, int64_t totalTileElems) {
+        return ireeGPUIsXORShuffleValid(numRowElems, numAccessElems,
+                                        totalTileElems);
+      },
+      "Returns true if the XOR shuffle is valid for the given number of row "
+      "elements, number of access elements, and total tile elements. "
+      "An XOR Shuffle can be invalid for many reasons: "
+      "- The number of row elements exceeds the total elements in the tile. "
+      "- The number of access elements exceeds the total elements in the row. "
+      "- The number of row elements does not evenly divide the total elements "
+      "in the tile. "
+      "- The number of access elements does not evenly divide the number of "
+      "row elements. "
+      "- The number of columns in a row does not evenly divide the total "
+      "number of tile elements.",
+      py::arg("num_row_elems"), py::arg("num_access_elems"),
+      py::arg("total_tile_elems"));
+
+  //===-------------------------------------------------------------------===//
   // Binding to utility function getExecutableVariantOps
   //===-------------------------------------------------------------------===//
 
