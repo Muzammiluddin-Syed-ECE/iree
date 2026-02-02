@@ -250,8 +250,12 @@ def IREECodegen_InnerTileDescAttrInterface :
     >,
     InterfaceMethod<
       /*desc=*/[{
-        Returns a tuple of the dimension sizes present in the operands of the
-        inner tiled operation.
+        Returns the shape of the MMA operation:
+        ```
+        C += A * B
+        ```
+        Where `A` has shape `<M, K0, K1, ...>`, `B` has shape
+        `<K0, K1, ..., N>`, and `C` has shape `<M, N>`.
         
         For most intrinsics, this returns `{M, N, {K}}` where K is a single reduction
         dimension. For scaled MMA intrinsics with block scales, this returns

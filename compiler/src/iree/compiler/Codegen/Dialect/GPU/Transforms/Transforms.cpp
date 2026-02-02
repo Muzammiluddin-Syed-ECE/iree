@@ -1252,10 +1252,9 @@ convertScaledContractionToInnerTiledMma(
   }
 
   SmallVector<int64_t> bounds = linalgOp.getStaticLoopRanges();
-  auto [intrinsicM, intrinsicN, kDims] = smmaKind.getMNKShape();
-  int64_t intrinsicK = kDims[0];
+  auto [intrinsicM, intrinsicN, intrinsicKs] = smmaKind.getMNKShape();
   if (intrinsicM != bounds[innerM] || intrinsicN != bounds[innerN] ||
-      intrinsicK != bounds[innerK]) {
+      intrinsicKs[0] != bounds[innerK]) {
     return failure();
   }
 
@@ -1398,11 +1397,10 @@ FailureOr<IREE::Codegen::InnerTiledOp> convertContractionToInnerTiledMma(
 
   SmallVector<int64_t> bounds = linalgOp.getStaticLoopRanges();
 
-  auto [intrinsicM, intrinsicN, intrinsicKDims] = mmaKind.getMNKShape();
-  assert(intrinsicKDims.size() == 1 && "MMA should have single K dimension");
-  int64_t intrinsicK = intrinsicKDims[0];
+  auto [intrinsicM, intrinsicN, intrinsicKs] = mmaKind.getMNKShape();
+  assert(intrinsicKs.size() == 1 && "MMA should have single K dimension");
   if (intrinsicM != bounds[innerM] || intrinsicN != bounds[innerN] ||
-      intrinsicK != bounds[innerK]) {
+      intrinsicKs[0] != bounds[innerK]) {
     return failure();
   }
 

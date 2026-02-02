@@ -248,20 +248,19 @@ LogicalResult verifySPIRVCooperativeMatrixVectorizePassPipeline(
   // sizes.
   bool isNativeVectorSizeAccepted = false;
   for (IREE::GPU::MMAAttr mma : target.getWgp().getMma()) {
-    auto [mSize, nSize, kSizeDims] = mma.getMNKShape();
-    int64_t kSize = kSizeDims[0];
+    auto [mSize, nSize, kSize] = mma.getMNKShape();
     auto [aType, bType, cType] = mma.getABCElementTypes();
 
     if (aType == lhsType && bType == rhsType && cType == resultType &&
         mSize == nativeVectorSizes[0] && nSize == nativeVectorSizes[1] &&
-        kSize == nativeVectorSizes[2]) {
+        kSize[0] == nativeVectorSizes[2]) {
       isNativeVectorSizeAccepted = true;
       if (subgroupTileSizes[0] % mSize != 0 ||
           subgroupTileSizes[1] % nSize != 0 ||
-          reductionTileSizes[2] % kSize != 0) {
+          reductionTileSizes[2] % kSize[0] != 0) {
         return op->emitOpError(
                    "expected subgroup tile sizes to be multiple of ")
-               << "[" << mSize << ", " << nSize << ", " << kSize << "]";
+               << "[" << mSize << ", " << nSize << ", " << kSize[0] << "]";
       }
     }
   }

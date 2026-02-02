@@ -357,13 +357,11 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
         continue;
       }
 
-      auto [m, n, kDims] = smma.getMNKShape();
-      int64_t k = kDims[0];
-      int64_t kB = kDims[1];
+      auto [m, n, k] = smma.getMNKShape();
       SmallVector<Type> elementTypes;
       smma.getElementTypes(elementTypes);
       intrinsics.emplace_back(GPUIntrinsicType(
-          {m}, {n}, {k, kB}, {}, elementTypes[kScaledMMAOperandLhs],
+          {m}, {n}, k, {}, elementTypes[kScaledMMAOperandLhs],
           elementTypes[kScaledMMAOperandRhs],
           elementTypes[kScaledMMAOperandAcc], smma));
     }
@@ -378,10 +376,9 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
         continue;
       }
 
-      auto [mSize, nSize, kSizeDims] = mma.getMNKShape();
-      int64_t kSize = kSizeDims[0];
+      auto [mSize, nSize, kSize] = mma.getMNKShape();
       auto [aType, bType, cType] = mma.getABCElementTypes();
-      intrinsics.emplace_back(mSize, nSize, kSize, aType, bType, cType, mma);
+      intrinsics.emplace_back(mSize, nSize, kSize[0], aType, bType, cType, mma);
     }
   }
   if (intrinsics.empty()) {
@@ -962,15 +959,8 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     }
 
     int64_t kPackFactor, innerKDim = contractionK.back();
-    if (scaled) {
-      auto smmaKind = cast<IREE::GPU::ScaledMMAAttr>(kind);
-      auto [m, n, kDims] = smmaKind.getMNKShape();
-      kPackFactor = kDims[0];
-    } else {
-      auto mmaKind = cast<IREE::GPU::MmaInterfaceAttr>(kind);
-      auto [m, n, kDims] = mmaKind.getMNKShape();
-      kPackFactor = kDims[0];
-    }
+    auto [m, n, kDims] = smmaKind.getMNKShape();
+    kPackFactor = kDims[0];
     paddingTileSizes[innerKDim] *= kPackFactor;
     attrs.emplace_back("padding", b.getI64ArrayAttr(paddingTileSizes));
 

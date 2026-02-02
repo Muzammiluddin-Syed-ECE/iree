@@ -52,18 +52,16 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
     return packedSizes;
   };
 
-  SmallVector<int64_t> dims;
   SmallVector<SmallVector<unsigned, 2>> indices;
+  auto [m, n, kDims] = kind.getMNKShape();
+  SmallVector<int64_t> dims = {m, n, kDims[0]};
   if (auto smmaKind = dyn_cast<IREE::GPU::ScaledMMAAttr>(kind)) {
     FailureOr<IREE::LinalgExt::ScaledContractionDimensions> scaledContrDims =
         IREE::LinalgExt::inferScaledContractionDims(linalgOp);
     if (succeeded(scaledContrDims)) {
-      auto [m, n, kDims] = smmaKind.getMNKShape();
-      int64_t k = kDims[0];
-      int64_t kB = kDims[1];
+      dims.push_back(kDims[1]);
       indices = {scaledContrDims->m, scaledContrDims->n, scaledContrDims->k,
                  scaledContrDims->kB};
-      dims = {m, n, k, kB};
     }
   }
 
@@ -71,10 +69,7 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
     FailureOr<linalg::ContractionDimensions> contractionDims =
         linalg::inferContractionDims(linalgOp);
     if (succeeded(contractionDims)) {
-      auto [m, n, kDims] = mmaKind.getMNKShape();
-      int64_t k = kDims[0];
       indices = {contractionDims->m, contractionDims->n, contractionDims->k};
-      dims = {m, n, k};
     }
   }
 

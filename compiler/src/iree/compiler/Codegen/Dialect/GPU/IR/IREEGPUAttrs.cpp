@@ -1313,10 +1313,9 @@ LogicalResult VirtualMMAAttr::buildUnderlyingOperations(
   case VirtualMMAIntrinsic::VMFMA_F32_32x32x16_F16: {
     // Generate mfma's for K with unrolled kernels.
     const int64_t unrollKFactor = getIntrinsicsK();
-    auto [m, n, kDims] = getMNKShape();
-    int64_t k = kDims[0];
+    auto [m, n, k] = getMNKShape();
     // Compute actual/native intrinsic's K size.
-    int64_t nativeKSize = k / unrollKFactor;
+    int64_t nativeKSize = k[0] / unrollKFactor;
 
     auto [aType, bType, cType] = getABCVectorTypes();
     if (aType.getShape()[0] != bType.getShape()[0]) {

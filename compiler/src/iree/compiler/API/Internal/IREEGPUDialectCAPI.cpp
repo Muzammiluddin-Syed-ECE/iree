@@ -239,10 +239,10 @@ ireeGPUMMAInfo ireeGPUMMAAttrGetInfo(MlirAttribute attr) {
         info.bVectorType = wrap(bVecType);
         info.cVectorType = wrap(cVecType);
 
-        auto [m, n, kDims] = mma.getMNKShape();
+        auto [m, n, k] = mma.getMNKShape();
         info.mElements = m;
         info.nElements = n;
-        info.kElements = kDims[0];  // MMA and VirtualMMA have single K dimension
+        info.kElements = k[0];
 
         return info;
       })

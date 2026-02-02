@@ -204,8 +204,7 @@ spirv::ResourceLimitsAttr convertLimits(IREE::GPU::TargetAttr target) {
 
   SmallVector<Attribute, 4> coopMatAttrs;
   for (IREE::GPU::MMAAttr mmaOp : wgp.getMma()) {
-    auto [mSize, nSize, kSizeDims] = mmaOp.getMNKShape();
-    int64_t kSize = kSizeDims[0];
+    auto [mSize, nSize, kSize] = mmaOp.getMNKShape();
     auto [aType, bType, cType] = mmaOp.getABCElementTypes();
 
     // Filter out types not supported by VK_KHR_cooperative_matrix. See
@@ -224,7 +223,7 @@ spirv::ResourceLimitsAttr convertLimits(IREE::GPU::TargetAttr target) {
     }
 
     coopMatAttrs.push_back(spirv::CooperativeMatrixPropertiesKHRAttr::get(
-        context, mSize, nSize, kSize, aType, bType, cType, cType,
+        context, mSize, nSize, kSize[0], aType, bType, cType, cType,
         false /*saturatingAccumulation*/,
         spirv::ScopeAttr::get(context, spirv::Scope::Subgroup)));
   }
