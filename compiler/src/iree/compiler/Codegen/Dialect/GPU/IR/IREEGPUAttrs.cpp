@@ -690,6 +690,14 @@ int64_t MMAAttr::getSubgroupSize() const {
   return getIntrinsicSubgroupSize(getIntrinsic());
 }
 
+std::tuple<int64_t, int64_t, SmallVector<int64_t>>
+MMAAttr::getMNKShape() const {
+  auto [m, n, k] = getMNKShapeFromIntrinsic(getIntrinsic());
+  SmallVector<int64_t> kDims{k};
+  assert(kDims.size() == 1 && "MMA should have single K dimension");
+  return {m, n, kDims};
+}
+
 Attribute MMAAttr::getDistributionMappingKind() const {
   // Explicit distribution currently unsupported for NV intrinsics.
   MMAIntrinsic intrinsic = getIntrinsic();
@@ -961,6 +969,14 @@ int64_t DataTiledMMAAttr::getFlatWorkgroupSize() const {
          getSubgroupsK();
 }
 
+std::tuple<int64_t, int64_t, SmallVector<int64_t>>
+DataTiledMMAAttr::getMNKShape() const {
+  auto [m, n, k] = getMNKShapeFromIntrinsic(getIntrinsic());
+  SmallVector<int64_t> kDims{k};
+  assert(kDims.size() == 1 && "MMA should have single K dimension");
+  return {m, n, kDims};
+}
+
 /// Increment the mutable vector `indices` to traverse the index space below
 /// `sizes`, with the last dimension moving fastest, or returns false if that
 /// index space was exhausted.
@@ -1218,6 +1234,14 @@ int64_t VirtualMMAAttr::getSubgroupSize() const {
   return 0;
 }
 
+std::tuple<int64_t, int64_t, SmallVector<int64_t>>
+VirtualMMAAttr::getMNKShape() const {
+  auto [m, n, k] = IREE::GPU::getMNKShape(getIntrinsic());
+  SmallVector<int64_t> kDims{k};
+  assert(kDims.size() == 1 && "Virtual MMA should have single K dimension");
+  return {m, n, kDims};
+}
+
 Attribute VirtualMMAAttr::getDistributionMappingKind() const {
   return IREE::GPU::LaneIdAttr::get(getContext(), 0);
 }
@@ -1289,7 +1313,8 @@ LogicalResult VirtualMMAAttr::buildUnderlyingOperations(
   case VirtualMMAIntrinsic::VMFMA_F32_32x32x16_F16: {
     // Generate mfma's for K with unrolled kernels.
     const int64_t unrollKFactor = getIntrinsicsK();
-    auto [m, n, k] = getMNKShape();
+    auto [m, n, kDims] = getMNKShape();
+    int64_t k = kDims[0];
     // Compute actual/native intrinsic's K size.
     int64_t nativeKSize = k / unrollKFactor;
 
@@ -1716,6 +1741,14 @@ int64_t getKbSize(ScaledMMAIntrinsic intrinsic) {
   return std::get<3>(getMNKKbShapeFromScaledIntrinsic(intrinsic));
 }
 
+std::tuple<int64_t, int64_t, SmallVector<int64_t>>
+ScaledMMAAttr::getMNKShape() const {
+  auto [m, n, k, kb] = getMNKKbShapeFromScaledIntrinsic(getIntrinsic());
+  SmallVector<int64_t> kDims{k, kb};
+  assert(kDims.size() == 2 && "Scaled MMA should have two K dimensions (K and KB)");
+  return {m, n, kDims};
+}
+
 IREE::Codegen::TileMxNxKxKb DataTiledScaledMMAAttr::getTileMNKKb() const {
   IREE::Codegen::TileMxNxKxKb innerTile;
   std::tie(innerTile.M, innerTile.N, innerTile.K, innerTile.KB) =
@@ -1881,6 +1914,14 @@ int64_t DataTiledScaledMMAAttr::getSubgroupSize() const {
 int64_t DataTiledScaledMMAAttr::getFlatWorkgroupSize() const {
   return getSubgroupSize() * getSubgroupsM() * getSubgroupsN() *
          getSubgroupsK();
+}
+
+std::tuple<int64_t, int64_t, SmallVector<int64_t>>
+DataTiledScaledMMAAttr::getMNKShape() const {
+  auto [m, n, k, kb] = getMNKKbShapeFromScaledIntrinsic(getIntrinsic());
+  SmallVector<int64_t> kDims{k, kb};
+  assert(kDims.size() == 2 && "Scaled MMA should have two K dimensions (K and KB)");
+  return {m, n, kDims};
 }
 
 LogicalResult

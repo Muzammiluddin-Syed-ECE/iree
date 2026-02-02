@@ -192,7 +192,8 @@ getContractionLayout(Operation *candidate, ArrayRef<int64_t> bounds,
   // Since these MMA intrinsics have a given tile size for each subgroup, we can
   // calculate the batch dimensions without looking at the subgroup layout.
   SmallVector<int64_t> subgroupSize(rank, 1);
-  auto [mSize, nSize, kSize] = intrinsic.getMNKShape();
+  auto [mSize, nSize, kSizeDims] = intrinsic.getMNKShape();
+  int64_t kSize = kSizeDims[0];
   subgroupSize[innerMDim] = mSize;
   subgroupSize[innerNDim] = nSize;
   subgroupSize[innerKDim] = kSize;

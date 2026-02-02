@@ -166,7 +166,8 @@ getIntrinsics(linalg::LinalgOp linalgOp,
   IREE::GPU::MMAOpsArrayAttr mmaKinds = target.getWgp().getMma();
 
   return llvm::map_to_vector(mmaKinds, [](IREE::GPU::MMAAttr mma) {
-    auto [mSize, nSize, kSize] = mma.getMNKShape();
+    auto [mSize, nSize, kSizeDims] = mma.getMNKShape();
+    int64_t kSize = kSizeDims[0];
     auto [aType, bType, cType] = mma.getABCElementTypes();
     return GPUIntrinsicType{mSize, nSize, kSize, aType, bType, cType, mma};
   });

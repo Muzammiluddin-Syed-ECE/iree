@@ -58,7 +58,9 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
     FailureOr<IREE::LinalgExt::ScaledContractionDimensions> scaledContrDims =
         IREE::LinalgExt::inferScaledContractionDims(linalgOp);
     if (succeeded(scaledContrDims)) {
-      auto [m, n, k, kB] = smmaKind.getScaledMNKShape();
+      auto [m, n, kDims] = smmaKind.getMNKShape();
+      int64_t k = kDims[0];
+      int64_t kB = kDims[1];
       indices = {scaledContrDims->m, scaledContrDims->n, scaledContrDims->k,
                  scaledContrDims->kB};
       dims = {m, n, k, kB};
@@ -69,7 +71,8 @@ getPackedSizes(linalg::LinalgOp linalgOp, RewriterBase &rewriter,
     FailureOr<linalg::ContractionDimensions> contractionDims =
         linalg::inferContractionDims(linalgOp);
     if (succeeded(contractionDims)) {
-      auto [m, n, k] = mmaKind.getMNKShape();
+      auto [m, n, kDims] = mmaKind.getMNKShape();
+      int64_t k = kDims[0];
       indices = {contractionDims->m, contractionDims->n, contractionDims->k};
       dims = {m, n, k};
     }

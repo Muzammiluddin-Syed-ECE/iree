@@ -248,6 +248,31 @@ def IREECodegen_InnerTileDescAttrInterface :
         return failure();
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns a tuple of the dimension sizes present in the operands of the
+        inner tiled operation.
+        
+        For most intrinsics, this returns `{M, N, {K}}` where K is a single reduction
+        dimension. For scaled MMA intrinsics with block scales, this returns
+        `{M, N, {K, Kb}}` where K and Kb are multiple reduction dimensions.
+      }],
+      /*retTy=*/"::std::tuple<int64_t, int64_t, ::llvm::SmallVector<int64_t>>",
+      /*methodName=*/"getMNKShape",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        ::llvm::SmallVector<::mlir::VectorType> preThreadTypes;
+        $_attr.getUndistributedTileTypes(preThreadTypes);
+        ::llvm::ArrayRef<int64_t> accShape = preThreadTypes[preThreadTypes.size() - 1].getShape();
+        ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
+        ::llvm::SmallVector<int64_t> kDims;
+        for (size_t i = 1; i < lhsShape.size(); ++i) {
+          kDims.push_back(lhsShape[i]);
+        }
+        return {accShape[0], accShape[1], kDims};
+      }]
+    >,
   ];
 
   let extraSharedClassDeclaration = [{

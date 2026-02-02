@@ -38,20 +38,6 @@ def IREEGPU_MmaInterfaceAttr
   // Methods included to preserve interfaces from beforet he InnerTileDescAttrInterface
   // refactoring.
   let extraSharedClassDeclaration = [{
-    /// Returns the shape of the MMA operation:
-    /// ```
-    ///   C += A * B
-    /// ```
-    /// Where, up to some transpositions, `A` has shape `<M, K>`, `B` has shape
-    /// `<K, N>`, and `C` has shape `<M, N>`.
-    ::std::tuple<int64_t, int64_t, int64_t>
-    getMNKShape() const {
-      ::llvm::SmallVector<::mlir::VectorType> preThreadTypes;
-      $_attr.getUndistributedTileTypes(preThreadTypes);
-      ::llvm::ArrayRef<int64_t> accShape = preThreadTypes[2].getShape();
-      ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
-      return {accShape[0], accShape[1], lhsShape[1]};
-    }
 
     /// Returns the element types of the operands to the MMA operation:
     /// ```
