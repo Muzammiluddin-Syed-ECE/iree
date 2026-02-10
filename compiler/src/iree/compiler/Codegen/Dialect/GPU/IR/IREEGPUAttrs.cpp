@@ -655,141 +655,36 @@ void IREE::GPU::InnerTiledSemanticsAttr::getTileTypes(
 }
 
 //===----------------------------------------------------------------------===//
-// MegaIntrinsic Attributes
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// MegaIntrinsic Attributes
-//===----------------------------------------------------------------------===//
-
-Attribute MegaIntrinsicAttr::parse(AsmParser &parser, Type type) {
-  if (parser.parseLess())
-    return {};
-
-  // Parse "intrinsic ="
-  if (parser.parseKeyword("intrinsic") || parser.parseEqual())
-    return {};
-
-  // Parse the MMA intrinsic enum
-  StringRef intrinsicStr;
-  if (parser.parseKeyword(&intrinsicStr))
-    return {};
-
-  std::optional<MMAIntrinsic> intrinsic =
-      symbolizeMMAIntrinsic(intrinsicStr);
-  if (!intrinsic) {
-    parser.emitError(parser.getCurrentLocation(), "invalid MMA intrinsic");
-    return {};
-  }
-
-  // Parse ", repeats ="
-  if (parser.parseComma() || parser.parseKeyword("repeats") ||
-      parser.parseEqual())
-    return {};
-
-  // Parse the array [a, b, c]
-  SmallVector<int64_t> repeats;
-  if (parser.parseLSquare())
-    return {};
-  
-  // Parse first element
-  int64_t value;
-  if (parser.parseInteger(value))
-    return {};
-  repeats.push_back(value);
-  
-  // Parse remaining elements
-  while (succeeded(parser.parseOptionalComma())) {
-    if (parser.parseInteger(value))
-      return {};
-    repeats.push_back(value);
-  }
-
-  if (parser.parseRSquare() || parser.parseGreater())
-    return {};
-
-  // Validate repeats array before creating the attribute
-  if (repeats.size() != 3) {
-    parser.emitError(parser.getCurrentLocation())
-        << "repeats must have exactly 3 elements [M, N, K], got "
-        << repeats.size();
-    return {};
-  }
-  
-  for (size_t i = 0; i < repeats.size(); ++i) {
-    if (repeats[i] < 1) {
-      parser.emitError(parser.getCurrentLocation())
-          << "repeats[" << i << "] must be at least 1, got " << repeats[i];
-      return {};
-    }
-  }
-
-  return MegaIntrinsicAttr::get(parser.getContext(), *intrinsic,
-                                 DenseI64ArrayAttr::get(parser.getContext(), repeats));
-}
-
-void MegaIntrinsicAttr::print(AsmPrinter &printer) const {
-  printer << "<intrinsic = " << stringifyMMAIntrinsic(getIntrinsic())
-          << ", repeats = [";
-  llvm::interleaveComma(getRepeats().asArrayRef(), printer);
-  printer << "]>";
-}
-
-LogicalResult MegaIntrinsicAttr::verify(
-    function_ref<InFlightDiagnostic()> emitError, MMAIntrinsic intrinsic,
-    DenseI64ArrayAttr repeats) {
-  ArrayRef<int64_t> repeatsArray = repeats.asArrayRef();
-  if (repeatsArray.size() != 3) {
-    return emitError() << "repeats must have exactly 3 elements [M, N, K], got "
-                       << repeatsArray.size();
-  }
-  for (int64_t i = 0; i < 3; ++i) {
-    if (repeatsArray[i] < 1) {
-      return emitError() << "repeats[" << i
-                         << "] must be at least 1, got " << repeatsArray[i];
-    }
-  }
-  return success();
-}
-
-std::tuple<int64_t, int64_t, int64_t>
-MegaIntrinsicAttr::getBaseIntrinsicMNKShape() const {
-  return getMNKShapeFromIntrinsic(getIntrinsic());
-}
-
-std::tuple<int64_t, int64_t, int64_t>
-MegaIntrinsicAttr::getEffectiveMNKShape() const {
-  auto [baseM, baseN, baseK] = getBaseIntrinsicMNKShape();
-  ArrayRef<int64_t> repeatsArray = getRepeats().asArrayRef();
-  return {baseM * repeatsArray[0], baseN * repeatsArray[1],
-          baseK * repeatsArray[2]};
-}
-
-int64_t MegaIntrinsicAttr::getNumPhysicalIntrinsics() const {
-  ArrayRef<int64_t> repeatsArray = getRepeats().asArrayRef();
-  return repeatsArray[0] * repeatsArray[1] * repeatsArray[2];
-}
-
-SmallVector<int64_t> MegaIntrinsicAttr::getRepeatsArray() const {
-  ArrayRef<int64_t> repeatsArray = getRepeats().asArrayRef();
-  return SmallVector<int64_t>(repeatsArray.begin(), repeatsArray.end());
-}
-
-//===----------------------------------------------------------------------===//
 // MMA Attributes
 //===----------------------------------------------------------------------===//
 
 MMAAttr MMAAttr::get(MLIRContext *context, MMAIntrinsic type) {
-  return Base::get(context, type, /*colMajor=*/false, /*megaIntrinsic=*/nullptr);
-}
-
-MMAAttr MMAAttr::get(MLIRContext *context, MMAIntrinsic type, bool colMajor) {
-  return Base::get(context, type, colMajor, /*megaIntrinsic=*/nullptr);
+  return Base::get(context, type, /*colMajor=*/false, /*repeats=*/nullptr);
 }
 
 MMAAttr MMAAttr::get(MLIRContext *context, MMAIntrinsic type,
-                     MegaIntrinsicAttr megaIntrinsic) {
-  return Base::get(context, type, /*colMajor=*/false, megaIntrinsic);
+                     DenseI64ArrayAttr repeats) {
+  return Base::get(context, type, /*colMajor=*/false, repeats);
+}
+
+LogicalResult
+MMAAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                MMAIntrinsic intrinsic, bool colMajor,
+                DenseI64ArrayAttr repeats) {
+  if (!repeats)
+    return success();
+  ArrayRef<int64_t> r = repeats.asArrayRef();
+  if (r.size() != 3) {
+    return emitError() << "repeats must have exactly 3 elements [M, N, K], got "
+                       << r.size();
+  }
+  for (int64_t i = 0; i < 3; ++i) {
+    if (r[i] < 1) {
+      return emitError()
+             << "repeats[" << i << "] must be at least 1, got " << r[i];
+    }
+  }
+  return success();
 }
 
 int64_t MMAAttr::getExpectedNumInputs() const { return 2; }
@@ -901,10 +796,25 @@ SmallVector<VirtualMMAIntrinsic> MMAAttr::getVirtualIntrinsics() const {
 }
 
 std::tuple<int64_t, int64_t, int64_t> MMAAttr::getEffectiveMNKShape() const {
-  if (getMegaIntrinsic()) {
-    return getMegaIntrinsic().getEffectiveMNKShape();
+  auto [baseM, baseN, baseK] = getMNKShapeFromIntrinsic(getIntrinsic());
+  if (getRepeats()) {
+    ArrayRef<int64_t> r = getRepeats().asArrayRef();
+    return {baseM * r[0], baseN * r[1], baseK * r[2]};
   }
-  return getMNKShapeFromIntrinsic(getIntrinsic());
+  return {baseM, baseN, baseK};
+}
+
+int64_t MMAAttr::getNumPhysicalIntrinsics() const {
+  if (!getRepeats())
+    return 1;
+  return llvm::product_of(getRepeats().asArrayRef());
+}
+
+SmallVector<int64_t> MMAAttr::getRepeatsArray() const {
+  if (!getRepeats())
+    return {1, 1, 1};
+  ArrayRef<int64_t> r = getRepeats().asArrayRef();
+  return SmallVector<int64_t>(r.begin(), r.end());
 }
 
 static Value createMmaOp(OpBuilder &builder, Location loc,

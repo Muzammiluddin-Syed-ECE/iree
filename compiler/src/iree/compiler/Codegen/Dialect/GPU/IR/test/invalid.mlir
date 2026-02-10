@@ -192,24 +192,24 @@ func.func @vector_multi_mma_with_permutation_of_wrong_size(%lhs: vector<2x3x4xf1
 
 // -----
 
-func.func @mega_intrinsic_invalid_repeats_size() attributes {
+func.func @mma_invalid_repeats_size() attributes {
     // expected-error @+1 {{repeats must have exactly 3 elements [M, N, K], got 2}}
-    mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2]>} {
+    mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, repeats = [2, 2]>} {
   return
 }
 
 // -----
 
-func.func @mega_intrinsic_invalid_repeats_negative() attributes {
+func.func @mma_invalid_repeats_negative() attributes {
     // expected-error @+1 {{repeats[0] must be at least 1, got 0}}
-    mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [0, 2, 1]>} {
+    mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, repeats = [0, 2, 1]>} {
   return
 }
 
 // -----
 
-func.func @mega_intrinsic_invalid_repeats_zero_k() attributes {
+func.func @mma_invalid_repeats_zero_k() attributes {
     // expected-error @+1 {{repeats[2] must be at least 1, got 0}}
-    mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 0]>} {
+    mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, repeats = [2, 2, 0]>} {
   return
 }

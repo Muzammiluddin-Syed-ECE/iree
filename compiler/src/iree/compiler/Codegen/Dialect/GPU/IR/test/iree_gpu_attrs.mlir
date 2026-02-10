@@ -236,20 +236,20 @@ module {
 //  CHECK-SAME:   promotion_types = [#iree_gpu.swizzle_operand<copy_config = #iree_gpu.derived_thread_config, swizzle = #iree_codegen.xor_shuffle<256, 32>>]
 
 module {
-  func.func @test_mega_intrinsic() attributes {
-      mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>} {
+  func.func @test_mma_with_repeats() attributes {
+      mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>} {
     return
   }
 }
-// CHECK-LABEL: func @test_mega_intrinsic
-//  CHECK-SAME:   mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>
+// CHECK-LABEL: func @test_mma_with_repeats
+//  CHECK-SAME:   mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16, repeats = [2, 2, 1]>
 
 module {
-  func.func @test_mega_intrinsic_mxfp4_scales() attributes {
-      mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x128_F8E4M3FN, repeats = [1, 1, 4]>} {
+  func.func @test_mma_with_repeats_mxfp4_scales() attributes {
+      mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x128_F8E4M3FN, repeats = [1, 1, 4]>} {
     return
   }
 }
-// CHECK-LABEL: func @test_mega_intrinsic_mxfp4_scales
-//  CHECK-SAME:   mega = #iree_gpu.mega_intrinsic<intrinsic = MFMA_F32_16x16x128_F8E4M3FN, repeats = [1, 1, 4]>
+// CHECK-LABEL: func @test_mma_with_repeats_mxfp4_scales
+//  CHECK-SAME:   mma_types = #iree_gpu.mma_layout<MFMA_F32_16x16x128_F8E4M3FN, repeats = [1, 1, 4]>
 
