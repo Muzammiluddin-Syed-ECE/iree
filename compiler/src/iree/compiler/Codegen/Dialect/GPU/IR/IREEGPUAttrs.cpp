@@ -1563,6 +1563,35 @@ int64_t ScaledMMAAttr::getSubgroupSize() const {
   return getIntrinsicSubgroupSize(getIntrinsic());
 }
 
+SmallVector<int64_t, 4> ScaledMMAAttr::getRepeatsArray() const {
+  if (auto reps = getRepeats()) {
+    ArrayRef<int64_t> vals = reps.asArrayRef();
+    return SmallVector<int64_t, 4>(vals.begin(), vals.end());
+  }
+  return {1, 1, 1, 1};
+}
+
+LogicalResult
+ScaledMMAAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                      ScaledMMAIntrinsic /*intrinsic*/, Type /*lhsElemType*/,
+                      Type /*rhsElemType*/, Type /*accElemType*/,
+                      bool /*colMajor*/, DenseI64ArrayAttr repeats) {
+  if (repeats) {
+    ArrayRef<int64_t> vals = repeats.asArrayRef();
+    if (vals.size() != 4) {
+      return emitError()
+             << "repeats must have exactly 4 elements [M, N, K, KB], got "
+             << vals.size();
+    }
+    for (auto [i, v] : llvm::enumerate(vals)) {
+      if (v < 1) {
+        return emitError() << "repeats[" << i << "] must be >= 1, got " << v;
+      }
+    }
+  }
+  return success();
+}
+
 SmallVector<Type> ScaledMMAAttr::getSupportedInputTypes(MLIRContext *ctx) {
   return {Float8E8M0FNUType::get(ctx),  Float8E5M2Type::get(ctx),
           Float8E5M2FNUZType::get(ctx), Float8E4M3FNType::get(ctx),
@@ -1614,11 +1643,18 @@ void ScaledMMAAttr::getUndistributedTileTypes(
   int64_t m = lhsLayout.outer[0] * lhsLayout.thread[0] * lhsLayout.element[0];
   int64_t kScale =
       lhsLayout.outer[1] * lhsLayout.thread[1] * lhsLayout.element[1];
-  [[maybe_unused]] int64_t layoutBlockSize =
+  int64_t layoutBlockSize =
       lhsLayout.outer[2] * lhsLayout.thread[2] * lhsLayout.element[2];
   assert(blockSize == layoutBlockSize &&
          "expected block size to be set up correctly");
   int64_t n = rhsLayout.outer[2] * rhsLayout.thread[2] * rhsLayout.element[2];
+
+  // Scale M, N, K, and blockSize by the repeat factors.
+  SmallVector<int64_t, 4> reps = getRepeatsArray();
+  m *= reps[0];
+  n *= reps[1];
+  kScale *= reps[2];
+  blockSize *= reps[3];
 
   Type lhsType = getLhsElemType();
   Type rhsType = getRhsElemType();
@@ -1630,6 +1666,36 @@ void ScaledMMAAttr::getUndistributedTileTypes(
   results.push_back(VectorType::get({m, kScale}, scaleType));
   results.push_back(VectorType::get({kScale, n}, scaleType));
   results.push_back(VectorType::get({m, n}, accType));
+}
+
+void ScaledMMAAttr::getInnerDimKinds(
+    SmallVectorImpl<SmallVector<ScaledMMADimKind>> &result) const {
+  using DK = ScaledMMADimKind;
+  // NOTE: These mappings are hardcoded because all current
+  // ScaledMMAIntrinsic variants share the same operand layout convention.
+  // If a future intrinsic has a different layout (e.g. transposed LHS),
+  // this function must be updated or made intrinsic-dependent.
+  //
+  // These mappings mirror getUndistributedTileTypes() above:
+  //   LHS:       {m, kScale, blockSize} → {M, K, KB}
+  //   RHS:       {kScale, blockSize, n} → {K, KB, N}
+  //   LHS_scale: {m, kScale}            → {M, K}
+  //   RHS_scale: {kScale, n}            → {K, N}
+  //   ACC:       {m, n}                 → {M, N}
+  result.push_back({DK::M, DK::K, DK::KB}); // LHS
+  result.push_back({DK::K, DK::KB, DK::N}); // RHS
+  result.push_back({DK::M, DK::K});          // LHS scale
+  result.push_back({DK::K, DK::N});          // RHS scale
+  result.push_back({DK::M, DK::N});          // ACC
+}
+
+void ScaledMMAAttr::getInnerIteratorTypes(
+    SmallVectorImpl<utils::IteratorType> &result) const {
+  // One entry per repeat dimension: [M, N, K, KB].
+  result.assign({utils::IteratorType::parallel,   // M  (repeat idx 0)
+                 utils::IteratorType::parallel,   // N  (repeat idx 1)
+                 utils::IteratorType::reduction,  // K  (repeat idx 2)
+                 utils::IteratorType::reduction}); // KB (repeat idx 3)
 }
 
 void ScaledMMAAttr::getDistributedTileTypes(

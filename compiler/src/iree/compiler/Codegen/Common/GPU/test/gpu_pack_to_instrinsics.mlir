@@ -139,6 +139,151 @@ module {
 
 // -----
 
+// Verify that scaled_mma_layout with repeats produces inner_tiled ops with
+// correct shapes and preserves the repeats attribute through the pass.
+#map = affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>
+#map1 = affine_map<(d0, d1, d2, d3) -> (d1, d2, d3)>
+#map2 = affine_map<(d0, d1, d2, d3) -> (d0, d2)>
+#map3 = affine_map<(d0, d1, d2, d3) -> (d1, d2)>
+#map4 = affine_map<(d0, d1, d2, d3) -> (d0, d1)>
+module {
+  func.func @scaled_mfma_16x16x128_with_k_repeats(%a: tensor<?x?x?xf4E2M1FN>, %b: tensor<?x?x?xf4E2M1FN>, %a_scales: tensor<?x?xf8E8M0FNU>, %b_scales: tensor<?x?xf8E8M0FNU>, %c: tensor<?x?xf32>) -> tensor<?x?xf32> {
+    %mm = linalg.generic {
+      indexing_maps = [#map, #map1, #map2, #map3, #map4],
+      iterator_types = ["parallel", "parallel", "reduction", "reduction"]
+    } ins(%a, %b, %a_scales, %b_scales : tensor<?x?x?xf4E2M1FN>, tensor<?x?x?xf4E2M1FN>, tensor<?x?xf8E8M0FNU>, tensor<?x?xf8E8M0FNU>)
+    outs(%c : tensor<?x?xf32>) attrs =  {
+      lowering_config = #iree_gpu.lowering_config<{mma_kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f4E2M1FN, acc_elem_type = f32, repeats = [1, 1, 4, 1]>}>
+    } {
+    ^bb0(%in: f4E2M1FN, %in_4: f4E2M1FN, %in_5: f8E8M0FNU, %in_6: f8E8M0FNU, %out: f32):
+      %17 = arith.scaling_extf %in, %in_5 : f4E2M1FN, f8E8M0FNU to f32
+      %18 = arith.scaling_extf %in_4, %in_6 : f4E2M1FN, f8E8M0FNU to f32
+      %19 = arith.mulf %17, %18 : f32
+      %20 = arith.addf %out, %19 : f32
+      linalg.yield %20 : f32
+    } -> tensor<?x?xf32>
+    return %mm : tensor<?x?xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @scaled_mfma_16x16x128_with_k_repeats
+//       CHECK:   iree_codegen.inner_tiled
+//  CHECK-SAME:     indexing_maps =
+//  CHECK-SAME:       affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>
+//  CHECK-SAME:       affine_map<(d0, d1, d2, d3) -> (d1, d2, d3)>
+//  CHECK-SAME:       affine_map<(d0, d1, d2, d3) -> (d0, d2)>
+//  CHECK-SAME:       affine_map<(d0, d1, d2, d3) -> (d1, d2)>
+//  CHECK-SAME:       affine_map<(d0, d1, d2, d3) -> (d0, d1)>
+//  CHECK-SAME:     lowering_config = #iree_gpu.lowering_config<{mma_kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f4E2M1FN, acc_elem_type = f32, repeats = [1, 1, 4, 1]>}>
+//  CHECK-SAME:     permutations = [array<i64: 0, 1, 2>, array<i64: 2, 0, 1>, array<i64: 0, 1>, array<i64: 1, 0>, array<i64: 0, 1>]
+//  CHECK-SAME:     : tensor<?x?x?x16x16x32xf4E2M1FN>, tensor<?x?x?x16x16x32xf4E2M1FN>, tensor<?x?x16x16xf8E8M0FNU>, tensor<?x?x16x16xf8E8M0FNU> into tensor<?x?x16x16xf32>
+
+// -----
+
+// Baseline static-shape test WITHOUT repeats (implicitly [1, 1, 1, 1]).
+// Same input shapes as scaled_mfma_16x16x128_k_repeats_static below.
+//
+// Base intrinsic MFMA_SCALE_F32_16x16x128_B32:
+//   M=16, N=16, K_total=128 (kScale=4, blockSize=32)
+//
+// With kScale=4, the K=16 input dimension yields 4 outer K tiles (16/4=4).
+// Compare with the repeats=[1,1,4,1] test below where the same K=16 yields
+// only 1 outer K tile (16/16=1) because the grouped kScale is 4*4=16.
+#map = affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>
+#map1 = affine_map<(d0, d1, d2, d3) -> (d1, d2, d3)>
+#map2 = affine_map<(d0, d1, d2, d3) -> (d0, d2)>
+#map3 = affine_map<(d0, d1, d2, d3) -> (d1, d2)>
+#map4 = affine_map<(d0, d1, d2, d3) -> (d0, d1)>
+module {
+  func.func @scaled_mfma_16x16x128_no_repeats_static(
+      %a: tensor<32x16x32xf4E2M1FN>, %b: tensor<48x16x32xf4E2M1FN>,
+      %a_scales: tensor<32x16xf8E8M0FNU>, %b_scales: tensor<48x16xf8E8M0FNU>,
+      %c: tensor<32x48xf32>) -> tensor<32x48xf32> {
+    %mm = linalg.generic {
+      indexing_maps = [#map, #map1, #map2, #map3, #map4],
+      iterator_types = ["parallel", "parallel", "reduction", "reduction"]
+    } ins(%a, %b, %a_scales, %b_scales : tensor<32x16x32xf4E2M1FN>, tensor<48x16x32xf4E2M1FN>, tensor<32x16xf8E8M0FNU>, tensor<48x16xf8E8M0FNU>)
+    outs(%c : tensor<32x48xf32>) attrs =  {
+      lowering_config = #iree_gpu.lowering_config<{mma_kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f4E2M1FN, acc_elem_type = f32>}>
+    } {
+    ^bb0(%in: f4E2M1FN, %in_4: f4E2M1FN, %in_5: f8E8M0FNU, %in_6: f8E8M0FNU, %out: f32):
+      %17 = arith.scaling_extf %in, %in_5 : f4E2M1FN, f8E8M0FNU to f32
+      %18 = arith.scaling_extf %in_4, %in_6 : f4E2M1FN, f8E8M0FNU to f32
+      %19 = arith.mulf %17, %18 : f32
+      %20 = arith.addf %out, %19 : f32
+      linalg.yield %20 : f32
+    } -> tensor<32x48xf32>
+    return %mm : tensor<32x48xf32>
+  }
+}
+
+// Without repeats: inner K tile = 4 (base kScale), so K=16 yields 4 outer
+// K tiles (16/4=4). Inner tiles are [16, 4, 32] for data, [16, 4] for scales.
+// CHECK-LABEL: func.func @scaled_mfma_16x16x128_no_repeats_static
+//   CHECK-DAG:   %[[A_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1, 2] inner_tiles = [16, 4, 32] into %{{.+}} : tensor<32x16x32xf4E2M1FN> -> tensor<2x4x1x16x4x32xf4E2M1FN>
+//   CHECK-DAG:   %[[B_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1, 2] inner_tiles = [16, 4, 32] into %{{.+}} : tensor<48x16x32xf4E2M1FN> -> tensor<3x4x1x16x4x32xf4E2M1FN>
+//   CHECK-DAG:   %[[AS_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1] inner_tiles = [16, 4] into %{{.+}} : tensor<32x16xf8E8M0FNU> -> tensor<2x4x16x4xf8E8M0FNU>
+//   CHECK-DAG:   %[[BS_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1] inner_tiles = [16, 4] into %{{.+}} : tensor<48x16xf8E8M0FNU> -> tensor<3x4x16x4xf8E8M0FNU>
+//   CHECK-DAG:   %[[C_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1] inner_tiles = [16, 16] into %{{.+}} : tensor<32x48xf32> -> tensor<2x3x16x16xf32>
+//       CHECK:   iree_codegen.inner_tiled ins(%[[A_PACK]], %[[B_PACK]], %[[AS_PACK]], %[[BS_PACK]]) outs(%[[C_PACK]])
+//  CHECK-SAME:     kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f4E2M1FN, acc_elem_type = f32>
+//  CHECK-SAME:     : tensor<2x4x1x16x4x32xf4E2M1FN>, tensor<3x4x1x16x4x32xf4E2M1FN>, tensor<2x4x16x4xf8E8M0FNU>, tensor<3x4x16x4xf8E8M0FNU> into tensor<2x3x16x16xf32>
+
+// -----
+
+// Static-shape test: verify that repeats = [1, 1, 4, 1] scales the grouped
+// intrinsic shape from 16x16x128 to 16x16x512.
+//
+// Base intrinsic MFMA_SCALE_F32_16x16x128_B32:
+//   M=16, N=16, K_total=128 (kScale=4, blockSize=32, so 4*32=128)
+// With repeats=[1,1,4,1]:
+//   M=16, N=16, K_total=512 (kScale=4*4=16, blockSize=32, so 16*32=512)
+//
+// Inputs use kScale=16, KB=32 so K_total = 16*32 = 512, exactly one
+// grouped tile along K. The pack inner tiles [16, 16, 32] confirm kScale=16.
+#map = affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>
+#map1 = affine_map<(d0, d1, d2, d3) -> (d1, d2, d3)>
+#map2 = affine_map<(d0, d1, d2, d3) -> (d0, d2)>
+#map3 = affine_map<(d0, d1, d2, d3) -> (d1, d2)>
+#map4 = affine_map<(d0, d1, d2, d3) -> (d0, d1)>
+module {
+  func.func @scaled_mfma_16x16x128_k_repeats_static(
+      %a: tensor<32x16x32xf4E2M1FN>, %b: tensor<48x16x32xf4E2M1FN>,
+      %a_scales: tensor<32x16xf8E8M0FNU>, %b_scales: tensor<48x16xf8E8M0FNU>,
+      %c: tensor<32x48xf32>) -> tensor<32x48xf32> {
+    %mm = linalg.generic {
+      indexing_maps = [#map, #map1, #map2, #map3, #map4],
+      iterator_types = ["parallel", "parallel", "reduction", "reduction"]
+    } ins(%a, %b, %a_scales, %b_scales : tensor<32x16x32xf4E2M1FN>, tensor<48x16x32xf4E2M1FN>, tensor<32x16xf8E8M0FNU>, tensor<48x16xf8E8M0FNU>)
+    outs(%c : tensor<32x48xf32>) attrs =  {
+      lowering_config = #iree_gpu.lowering_config<{mma_kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f4E2M1FN, acc_elem_type = f32, repeats = [1, 1, 4, 1]>}>
+    } {
+    ^bb0(%in: f4E2M1FN, %in_4: f4E2M1FN, %in_5: f8E8M0FNU, %in_6: f8E8M0FNU, %out: f32):
+      %17 = arith.scaling_extf %in, %in_5 : f4E2M1FN, f8E8M0FNU to f32
+      %18 = arith.scaling_extf %in_4, %in_6 : f4E2M1FN, f8E8M0FNU to f32
+      %19 = arith.mulf %17, %18 : f32
+      %20 = arith.addf %out, %19 : f32
+      linalg.yield %20 : f32
+    } -> tensor<32x48xf32>
+    return %mm : tensor<32x48xf32>
+  }
+}
+
+// K_total = kScale(16) * KB(32) = 512, matching the expected 16x16x512
+// grouped intrinsic. Outer K=1, outer KB=1 (exactly one grouped tile).
+// Inner tiles [16, 16, 32] show kScale=16 (4x the base kScale=4).
+// CHECK-LABEL: func.func @scaled_mfma_16x16x128_k_repeats_static
+//   CHECK-DAG:   %[[A_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1, 2] inner_tiles = [16, 16, 32] into %{{.+}} : tensor<32x16x32xf4E2M1FN> -> tensor<2x1x1x16x16x32xf4E2M1FN>
+//   CHECK-DAG:   %[[B_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1, 2] inner_tiles = [16, 16, 32] into %{{.+}} : tensor<48x16x32xf4E2M1FN> -> tensor<3x1x1x16x16x32xf4E2M1FN>
+//   CHECK-DAG:   %[[AS_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1] inner_tiles = [16, 16] into %{{.+}} : tensor<32x16xf8E8M0FNU> -> tensor<2x1x16x16xf8E8M0FNU>
+//   CHECK-DAG:   %[[BS_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1] inner_tiles = [16, 16] into %{{.+}} : tensor<48x16xf8E8M0FNU> -> tensor<3x1x16x16xf8E8M0FNU>
+//   CHECK-DAG:   %[[C_PACK:.+]] = linalg.pack %{{.+}} inner_dims_pos = [0, 1] inner_tiles = [16, 16] into %{{.+}} : tensor<32x48xf32> -> tensor<2x3x16x16xf32>
+//       CHECK:   iree_codegen.inner_tiled ins(%[[A_PACK]], %[[B_PACK]], %[[AS_PACK]], %[[BS_PACK]]) outs(%[[C_PACK]])
+//  CHECK-SAME:     kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f4E2M1FN, acc_elem_type = f32, repeats = [1, 1, 4, 1]>
+//  CHECK-SAME:     : tensor<2x1x1x16x16x32xf4E2M1FN>, tensor<3x1x1x16x16x32xf4E2M1FN>, tensor<2x1x16x16xf8E8M0FNU>, tensor<3x1x16x16xf8E8M0FNU> into tensor<2x3x16x16xf32>
+
+// -----
+
 #map = affine_map<(d0, d1, d2) -> (d0, d2)>
 #map1 = affine_map<(d0, d1, d2) -> (d2, d1)>
 #map2 = affine_map<(d0, d1, d2) -> (d0, d1)>

@@ -33,6 +33,9 @@ struct UnrollToIntrinsicsPass final
 void UnrollToIntrinsicsPass::runOnOperation() {
   MLIRContext *context = &getContext();
 
+  // Step 1: Standard outer-dimension unrolling.  Unrolls inner_tiled ops so
+  // that every outer iteration dimension is unit-size.  After this step each
+  // inner_tiled op represents a single (possibly grouped) intrinsic tile.
   {
     RewritePatternSet patterns(context);
     GPU::populateIREEGPUVectorUnrollPatterns(patterns);
@@ -41,8 +44,23 @@ void UnrollToIntrinsicsPass::runOnOperation() {
     }
   }
 
-  // Post unrolling unit dim folding patterns in preparation for later
-  // lowerings.
+  // Step 2: Decompose grouped inner tiles introduced by the `repeats`
+  // attribute.  After the outer unroll each inner_tiled op has unit outer
+  // dims but its inner tile may still be a multiple of the base intrinsic
+  // tile (e.g. kScale=16 instead of 4 when repeats=[1,1,4]).  This step
+  // slices the grouped tile into individual base-intrinsic inner_tiled ops
+  // using vector::ExtractStridedSliceOp, handling both parallel (M/N) and
+  // reduction (K) repeat dimensions.
+  {
+    RewritePatternSet patterns(context);
+    GPU::populateDecomposeRepeatsPatterns(patterns);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+      return signalPassFailure();
+    }
+  }
+
+  // Step 3: Post-unrolling unit dim folding patterns in preparation for
+  // later lowerings.
   {
     RewritePatternSet patterns(context);
     GPU::populateIREEGPUDropUnitDimsPatterns(patterns);

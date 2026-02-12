@@ -378,6 +378,91 @@ func.func @vector_scaled_multi_mma(%lhs: vector<2x3x1x32xf4E2M1FN>, %rhs: vector
 
 // -----
 
+// Distributed inner_tiled op with scaled_mma_layout + repeats = [1, 1, 4, 1].
+// The inner tile shapes are the same as without repeats (repeats groups
+// multiple intrinsics; it does not change per-intrinsic tile shapes).
+#contraction_accesses = [
+ affine_map<(i, j, k, b) -> (i, k, b)>,
+ affine_map<(i, j, k, b) -> (k, b, j)>,
+ affine_map<(i, j, k, b) -> (i, k)>,
+ affine_map<(i, j, k, b) -> (k, j)>,
+ affine_map<(i, j, k, b) -> (i, j)>
+]
+func.func @vector_scaled_multi_mma_with_k_repeats(%lhs: vector<2x3x1x32xf4E2M1FN>, %rhs: vector<3x1x5x32xf8E4M3FN>, %lhsScale: vector<2x3x1xf8E8M0FNU>,%rhsScale: vector<3x5x1xf8E8M0FNU>,
+    %acc: vector<2x5x4xf32>) -> vector<2x5x4xf32> {
+  %0 = iree_codegen.inner_tiled ins(%lhs, %rhs, %lhsScale, %rhsScale) outs(%acc) {
+    indexing_maps = #contraction_accesses,
+    iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>, #linalg.iterator_type<reduction>, #linalg.iterator_type<reduction>],
+    kind = #iree_gpu.scaled_mma_layout<
+      intrinsic = MFMA_SCALE_F32_16x16x128_B32,
+      lhs_elem_type = f4E2M1FN,
+      rhs_elem_type = f8E4M3FN,
+      acc_elem_type = f32,
+      repeats = [1, 1, 4, 1]>,
+    semantics = #iree_gpu.mma_semantics<distributed = true, opaque = false>
+  } : vector<2x3x1x32xf4E2M1FN>, vector<3x1x5x32xf8E4M3FN>, vector<2x3x1xf8E8M0FNU>, vector<3x5x1xf8E8M0FNU>
+    into vector<2x5x4xf32>
+  return %0 : vector<2x5x4xf32>
+}
+
+// CHECK: #[[$MAP:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>
+// CHECK: #[[$MAP1:.+]] = affine_map<(d0, d1, d2, d3) -> (d2, d3, d1)>
+// CHECK: #[[$MAP2:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d2)>
+// CHECK: #[[$MAP3:.+]] = affine_map<(d0, d1, d2, d3) -> (d2, d1)>
+// CHECK: #[[$MAP4:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d1)>
+
+// CHECK-LABEL: func @vector_scaled_multi_mma_with_k_repeats
+//       CHECK:   iree_codegen.inner_tiled ins(%arg0, %arg1, %arg2, %arg3) outs(%arg4)
+//  CHECK-SAME:       indexing_maps = [#[[$MAP]], #[[$MAP1]], #[[$MAP2]], #[[$MAP3]], #[[$MAP4]]]
+//  CHECK-SAME:       iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>, #linalg.iterator_type<reduction>, #linalg.iterator_type<reduction>]
+//  CHECK-SAME:       kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, repeats = [1, 1, 4, 1]>
+//  CHECK-SAME:     : vector<2x3x1x32xf4E2M1FN>, vector<3x1x5x32xf8E4M3FN>, vector<2x3x1xf8E8M0FNU>, vector<3x5x1xf8E8M0FNU> into vector<2x5x4xf32>
+
+// -----
+
+// Undistributed inner_tiled op with scaled_mma_layout + repeats = [2, 2, 1, 1].
+#contraction_accesses = [
+ affine_map<(i, j, k, b) -> (i, k, b)>,
+ affine_map<(i, j, k, b) -> (k, b, j)>,
+ affine_map<(i, j, k, b) -> (i, k)>,
+ affine_map<(i, j, k, b) -> (k, j)>,
+ affine_map<(i, j, k, b) -> (i, j)>
+]
+
+func.func @tensor_subgroup_scaled_multi_mma_with_mn_repeats(
+    %lhs: tensor<?x?x?x32x4x32xf4E2M1FN>, %rhs: tensor<?x?x?x4x32x32xf8E4M3FN>,
+    %lhsScale: tensor<?x?x32x4xf8E8M0FNU>, %rhsScale: tensor<?x?x4x32xf8E8M0FNU>,
+    %acc: tensor<?x?x32x32xf32>) -> tensor<?x?x32x32xf32> {
+  %0 = iree_codegen.inner_tiled ins(%lhs, %rhs, %lhsScale, %rhsScale) outs(%acc) {
+    indexing_maps = #contraction_accesses,
+    iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>, #linalg.iterator_type<reduction>, #linalg.iterator_type<reduction>],
+    kind = #iree_gpu.scaled_mma_layout<
+      intrinsic = MFMA_SCALE_F32_16x16x128_B32,
+      lhs_elem_type = f4E2M1FN,
+      rhs_elem_type = f8E4M3FN,
+      acc_elem_type = f32,
+      repeats = [2, 2, 1, 1]>,
+    semantics = #iree_gpu.mma_semantics<distributed = false, opaque = false>
+  } : tensor<?x?x?x32x4x32xf4E2M1FN>, tensor<?x?x?x4x32x32xf8E4M3FN>, tensor<?x?x32x4xf8E8M0FNU>, tensor<?x?x4x32xf8E8M0FNU>
+    into tensor<?x?x32x32xf32>
+  return %0 : tensor<?x?x32x32xf32>
+}
+
+// CHECK: #[[$MAP:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>
+// CHECK: #[[$MAP1:.+]] = affine_map<(d0, d1, d2, d3) -> (d2, d3, d1)>
+// CHECK: #[[$MAP2:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d2)>
+// CHECK: #[[$MAP3:.+]] = affine_map<(d0, d1, d2, d3) -> (d2, d1)>
+// CHECK: #[[$MAP4:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d1)>
+
+// CHECK-LABEL: func @tensor_subgroup_scaled_multi_mma_with_mn_repeats
+//       CHECK:   iree_codegen.inner_tiled ins(%arg0, %arg1, %arg2, %arg3) outs(%arg4)
+//  CHECK-SAME:     indexing_maps = [#[[$MAP]], #[[$MAP1]], #[[$MAP2]], #[[$MAP3]], #[[$MAP4]]],
+//  CHECK-SAME:     iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>, #linalg.iterator_type<reduction>, #linalg.iterator_type<reduction>],
+//  CHECK-SAME:     kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, repeats = [2, 2, 1, 1]>
+//  CHECK-SAME:     : tensor<?x?x?x32x4x32xf4E2M1FN>, tensor<?x?x?x4x32x32xf8E4M3FN>, tensor<?x?x32x4xf8E8M0FNU>, tensor<?x?x4x32xf8E8M0FNU> into tensor<?x?x32x32xf32>
+
+// -----
+
 #contraction_accesses = [
  affine_map<(i, j, k, b) -> (i, k, b)>,
  affine_map<(i, j, k, b) -> (k, b, j)>,

@@ -185,6 +185,7 @@ void mapLaneForalls(RewriterBase &rewriter, Operation *funcOp,
                     bool insertBarrier);
 
 // Various populate pattern methods.
+void populateDecomposeRepeatsPatterns(RewritePatternSet &patterns);
 void populateIREEGPUDropUnitDimsPatterns(RewritePatternSet &patterns);
 void populateIREEGPULowerInnerTiledPatterns(RewritePatternSet &patterns);
 void populateIREEGPULowerBarrierRegionPatterns(RewritePatternSet &patterns);

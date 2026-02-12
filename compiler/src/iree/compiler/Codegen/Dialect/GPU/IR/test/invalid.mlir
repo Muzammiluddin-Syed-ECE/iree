@@ -156,6 +156,30 @@ func.func @mma_inner_tiled_invalid_inner_types_distributed_nonopaque(%lhs: tenso
 
 // -----
 
+func.func @scaled_mma_invalid_repeats_wrong_size() attributes {
+    // expected-error @below {{repeats must have exactly 4 elements [M, N, K, KB], got 2}}
+    mma_types = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, repeats = [1, 4]>} {
+  return
+}
+
+// -----
+
+func.func @scaled_mma_invalid_repeats_zero_value() attributes {
+    // expected-error @below {{repeats[2] must be >= 1, got 0}}
+    mma_types = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, repeats = [1, 1, 0, 1]>} {
+  return
+}
+
+// -----
+
+func.func @scaled_mma_invalid_repeats_negative_value() attributes {
+    // expected-error @below {{repeats[0] must be >= 1, got -1}}
+    mma_types = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, repeats = [-1, 1, 4, 1]>} {
+  return
+}
+
+// -----
+
 func.func @vector_multi_mma_with_wrong_number_of_permutations(%lhs: vector<2x3x4xf16>, %rhs: vector<3x5x4xf16>, %acc: vector<2x5x4xf32>) -> vector<2x5x4xf32> {
   // expected-error @+1 {{op mismatch between the number of permutations (2) and the number of operands (3)}}
   %0 = iree_codegen.inner_tiled ins(%lhs, %rhs) outs(%acc) {

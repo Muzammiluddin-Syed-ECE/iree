@@ -234,6 +234,15 @@ constexpr int kScaledMMAOperandLhsScale = 2;
 constexpr int kScaledMMAOperandRhsScale = 3;
 constexpr int kScaledMMAOperandAcc = 4;
 
+/// Classification of a logical inner-tile dimension for ScaledMMAAttr.
+/// The integer values match the repeat index: M=0, N=1, K=2, KB=3.
+enum class ScaledMMADimKind : int64_t {
+  M = 0,
+  N = 1,
+  K = 2,
+  KB = 3, // Block-size reduction dimension.
+};
+
 template <typename MMAIntrinsicType>
 int isIntrinsicLhs(int operandIndex) {
   return operandIndex == (std::is_same_v<MMAIntrinsicType, ScaledMMAIntrinsic>
