@@ -234,6 +234,15 @@ constexpr int kScaledMMAOperandLhsScale = 2;
 constexpr int kScaledMMAOperandRhsScale = 3;
 constexpr int kScaledMMAOperandAcc = 4;
 
+/// Classification of a logical inner-tile dimension for ScaledMMAAttr.
+/// The integer values match the repeat index: M=0, N=1, K=2, KB=3.
+enum class ScaledMMADimKind : int64_t {
+  M = 0,
+  N = 1,
+  K = 2,
+  KB = 3, // Block-size reduction dimension.
+};
+
 template <typename MMAIntrinsicType>
 int isIntrinsicLhs(int operandIndex) {
   return operandIndex == (std::is_same_v<MMAIntrinsicType, ScaledMMAIntrinsic>
@@ -290,6 +299,14 @@ MMASingleSubgroupLayout getSingleSubgroupLayout(ScaledMMAIntrinsic intrinsic,
 MMASingleSubgroupLayout getSingleSubgroupLayout(ScaledMMAIntrinsic intrinsic,
                                                 int64_t operandIndex,
                                                 bool isAccColMajor);
+
+/// Returns a subgroup layout with the `element` fields scaled by the
+/// corresponding repeat factors.  The repeat-to-dimension mapping uses
+/// ScaledMMADimKind: repeats = [M, N, K, KB], operand dims vary per operand.
+MMASingleSubgroupLayout
+getRepeatedSubgroupLayout(ScaledMMAIntrinsic intrinsic, int64_t operandIndex,
+                          ArrayRef<int64_t> repeats,
+                          bool isAccColMajor = false);
 
 /// Returns the name of the tilling `level`, as used in the `lowering_config`
 /// attribute.

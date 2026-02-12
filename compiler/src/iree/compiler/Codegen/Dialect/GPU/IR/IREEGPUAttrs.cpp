@@ -1534,6 +1534,34 @@ MMASingleSubgroupLayout getSingleSubgroupLayout(ScaledMMAIntrinsic intrinsic,
   return {};
 }
 
+/// Operand-dimension kinds (hardcoded; all current ScaledMMA intrinsics
+/// share the same operand layout convention).
+static ArrayRef<ScaledMMADimKind>
+getOperandDimKinds(int64_t operandIndex) {
+  using DK = ScaledMMADimKind;
+  static const SmallVector<SmallVector<DK>> allKinds = {
+      {DK::M, DK::K, DK::KB}, // LHS
+      {DK::K, DK::KB, DK::N}, // RHS
+      {DK::M, DK::K},         // LHS scale
+      {DK::K, DK::N},         // RHS scale
+      {DK::M, DK::N},         // ACC
+  };
+  return allKinds[operandIndex];
+}
+
+MMASingleSubgroupLayout
+getRepeatedSubgroupLayout(ScaledMMAIntrinsic intrinsic, int64_t operandIndex,
+                          ArrayRef<int64_t> repeats, bool isAccColMajor) {
+  MMASingleSubgroupLayout layout =
+      getSingleSubgroupLayout(intrinsic, operandIndex, isAccColMajor);
+  ArrayRef<ScaledMMADimKind> dimKinds = getOperandDimKinds(operandIndex);
+  for (size_t d = 0; d < layout.element.size(); d++) {
+    int64_t repIdx = static_cast<int64_t>(dimKinds[d]);
+    layout.element[d] *= repeats[repIdx];
+  }
+  return layout;
+}
+
 int64_t ScaledMMAAttr::getBlockSize() const {
   switch (getIntrinsic()) {
   case ScaledMMAIntrinsic::MFMA_SCALE_F32_16x16x128_B32:
@@ -1561,6 +1589,35 @@ MMASingleSubgroupLayout getSingleSubgroupLayout(ScaledMMAIntrinsic intrinsic,
 
 int64_t ScaledMMAAttr::getSubgroupSize() const {
   return getIntrinsicSubgroupSize(getIntrinsic());
+}
+
+SmallVector<int64_t, 4> ScaledMMAAttr::getRepeatsArray() const {
+  if (auto reps = getRepeats()) {
+    ArrayRef<int64_t> vals = reps.asArrayRef();
+    return SmallVector<int64_t, 4>(vals.begin(), vals.end());
+  }
+  return {1, 1, 1, 1};
+}
+
+LogicalResult
+ScaledMMAAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                      ScaledMMAIntrinsic /*intrinsic*/, Type /*lhsElemType*/,
+                      Type /*rhsElemType*/, Type /*accElemType*/,
+                      bool /*colMajor*/, DenseI64ArrayAttr repeats) {
+  if (repeats) {
+    ArrayRef<int64_t> vals = repeats.asArrayRef();
+    if (vals.size() != 4) {
+      return emitError()
+             << "repeats must have exactly 4 elements [M, N, K, KB], got "
+             << vals.size();
+    }
+    for (auto [i, v] : llvm::enumerate(vals)) {
+      if (v < 1) {
+        return emitError() << "repeats[" << i << "] must be >= 1, got " << v;
+      }
+    }
+  }
+  return success();
 }
 
 SmallVector<Type> ScaledMMAAttr::getSupportedInputTypes(MLIRContext *ctx) {
@@ -1605,19 +1662,21 @@ ScaledMMAAttr::verifyIndexingMaps(ArrayRef<AffineMap> maps) const {
 
 void ScaledMMAAttr::getUndistributedTileTypes(
     SmallVectorImpl<VectorType> &results) const {
-  MMASingleSubgroupLayout lhsLayout =
-      getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandLhs);
-  MMASingleSubgroupLayout rhsLayout =
-      getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandRhs);
+  SmallVector<int64_t, 4> reps = getRepeatsArray();
+  MMASingleSubgroupLayout lhsLayout = getRepeatedSubgroupLayout(
+      getIntrinsic(), kScaledMMAOperandLhs, reps);
+  MMASingleSubgroupLayout rhsLayout = getRepeatedSubgroupLayout(
+      getIntrinsic(), kScaledMMAOperandRhs, reps);
+  MMASingleSubgroupLayout accLayout = getRepeatedSubgroupLayout(
+      getIntrinsic(), kScaledMMAOperandAcc, reps, getColMajor());
+  MMASingleSubgroupLayout lhsScaleLayout = getRepeatedSubgroupLayout(
+      getIntrinsic(), kScaledMMAOperandLhsScale, reps);
 
-  int64_t blockSize = getBlockSize();
   int64_t m = lhsLayout.outer[0] * lhsLayout.thread[0] * lhsLayout.element[0];
   int64_t kScale =
       lhsLayout.outer[1] * lhsLayout.thread[1] * lhsLayout.element[1];
-  [[maybe_unused]] int64_t layoutBlockSize =
+  int64_t blockSize =
       lhsLayout.outer[2] * lhsLayout.thread[2] * lhsLayout.element[2];
-  assert(blockSize == layoutBlockSize &&
-         "expected block size to be set up correctly");
   int64_t n = rhsLayout.outer[2] * rhsLayout.thread[2] * rhsLayout.element[2];
 
   Type lhsType = getLhsElemType();
@@ -1632,6 +1691,36 @@ void ScaledMMAAttr::getUndistributedTileTypes(
   results.push_back(VectorType::get({m, n}, accType));
 }
 
+void ScaledMMAAttr::getInnerDimKinds(
+    SmallVectorImpl<SmallVector<ScaledMMADimKind>> &result) const {
+  using DK = ScaledMMADimKind;
+  // NOTE: These mappings are hardcoded because all current
+  // ScaledMMAIntrinsic variants share the same operand layout convention.
+  // If a future intrinsic has a different layout (e.g. transposed LHS),
+  // this function must be updated or made intrinsic-dependent.
+  //
+  // These mappings mirror getUndistributedTileTypes() above:
+  //   LHS:       {m, kScale, blockSize} → {M, K, KB}
+  //   RHS:       {kScale, blockSize, n} → {K, KB, N}
+  //   LHS_scale: {m, kScale}            → {M, K}
+  //   RHS_scale: {kScale, n}            → {K, N}
+  //   ACC:       {m, n}                 → {M, N}
+  result.push_back({DK::M, DK::K, DK::KB}); // LHS
+  result.push_back({DK::K, DK::KB, DK::N}); // RHS
+  result.push_back({DK::M, DK::K});          // LHS scale
+  result.push_back({DK::K, DK::N});          // RHS scale
+  result.push_back({DK::M, DK::N});          // ACC
+}
+
+void ScaledMMAAttr::getInnerIteratorTypes(
+    SmallVectorImpl<utils::IteratorType> &result) const {
+  // One entry per repeat dimension: [M, N, K, KB].
+  result.assign({utils::IteratorType::parallel,   // M  (repeat idx 0)
+                 utils::IteratorType::parallel,   // N  (repeat idx 1)
+                 utils::IteratorType::reduction,  // K  (repeat idx 2)
+                 utils::IteratorType::reduction}); // KB (repeat idx 3)
+}
+
 void ScaledMMAAttr::getDistributedTileTypes(
     SmallVectorImpl<VectorType> &results) const {
   Type lhsType = getLhsElemType();
@@ -1639,11 +1728,12 @@ void ScaledMMAAttr::getDistributedTileTypes(
   Type accType = getAccElemType();
   Type scaleType = Float8E8M0FNUType::get(getContext());
 
+  SmallVector<int64_t, 4> reps = getRepeatsArray();
   std::array<Type, 5> argTypes = {lhsType, rhsType, scaleType, scaleType,
                                   accType};
   for (auto [opIndex, type] : llvm::enumerate(argTypes)) {
     MMASingleSubgroupLayout layout =
-        getSingleSubgroupLayout(getIntrinsic(), opIndex);
+        getRepeatedSubgroupLayout(getIntrinsic(), opIndex, reps);
     int64_t outer = ShapedType::getNumElements(layout.outer);
     int64_t element = ShapedType::getNumElements(layout.element);
     results.push_back(VectorType::get({outer * element}, type));
@@ -1654,8 +1744,9 @@ std::optional<SmallVector<int64_t, 2>>
 ScaledMMAAttr::getUndistributedTileDimExpansion(int64_t operandIndex,
                                                 int64_t dim) const {
   assert(operandIndex <= kScaledMMAOperandAcc && "invalid operand index");
-  MMASingleSubgroupLayout layout =
-      getSingleSubgroupLayout(getIntrinsic(), operandIndex, getColMajor());
+  SmallVector<int64_t, 4> reps = getRepeatsArray();
+  MMASingleSubgroupLayout layout = getRepeatedSubgroupLayout(
+      getIntrinsic(), operandIndex, reps, getColMajor());
   if (layout.outer[dim] > 1) {
     return SmallVector<int64_t, 2>{layout.outer[dim],
                                    layout.element[dim] * layout.thread[dim]};
@@ -1679,8 +1770,9 @@ LogicalResult ScaledMMAAttr::populateOperandOffsetsSizesStrides(
     SmallVectorImpl<OpFoldResult> &strides) const {
   assert(operandIndex <= kScaledMMAOperandAcc && "Scaled MFMA has 5 operands");
 
-  MMASingleSubgroupLayout subgroupLayout =
-      getSingleSubgroupLayout(getIntrinsic(), operandIndex, getColMajor());
+  SmallVector<int64_t, 4> reps = getRepeatsArray();
+  MMASingleSubgroupLayout subgroupLayout = getRepeatedSubgroupLayout(
+      getIntrinsic(), operandIndex, reps, getColMajor());
 
   SmallVector<OpFoldResult> canonicalOffsets;
   SmallVector<OpFoldResult> canonicalSizes;
@@ -1693,6 +1785,58 @@ LogicalResult ScaledMMAAttr::populateOperandOffsetsSizesStrides(
   sizes.append(canonicalSizes);
 
   return success();
+}
+
+/// Compute the per-lane multi-dimensional shape for an operand of a
+/// ScaledMMAAttr.  The shape is built from the repeated layout:
+///   [outer (if >1)] [element]
+/// for each logical dimension.  The element field already includes the
+/// repeat factor, so no separate repeat dimension is needed.
+static SmallVector<int64_t>
+getPerLaneMultiDimShape(ScaledMMAAttr attr, int64_t operandIndex) {
+  SmallVector<int64_t, 4> reps = attr.getRepeatsArray();
+  MMASingleSubgroupLayout layout = getRepeatedSubgroupLayout(
+      attr.getIntrinsic(), operandIndex, reps,
+      operandIndex == kScaledMMAOperandAcc && attr.getColMajor());
+
+  SmallVector<int64_t> shape;
+  for (size_t d = 0; d < layout.outer.size(); d++) {
+    if (layout.outer[d] > 1)
+      shape.push_back(layout.outer[d]);
+    shape.push_back(layout.element[d]);
+  }
+  return shape;
+}
+
+/// Compute multi-dim extraction offsets and sizes for a single base
+/// intrinsic invocation within a ScaledMMAAttr.  The repeated layout
+/// provides the full per-lane shape; the base layout provides the
+/// per-intrinsic element size.  For each dimension:
+///   offset = repeatIndex * baseElement, size = baseElement
+static void getIntrinsicSliceOffsetsAndSizes(
+    ScaledMMAAttr attr, int64_t operandIndex,
+    ArrayRef<int64_t> repeatIndices, // [rm, rn, rk, rkb]
+    SmallVectorImpl<int64_t> &offsets, SmallVectorImpl<int64_t> &sizes) {
+  bool isAccColMajor =
+      operandIndex == kScaledMMAOperandAcc && attr.getColMajor();
+  MMASingleSubgroupLayout baseLayout =
+      getSingleSubgroupLayout(attr.getIntrinsic(), operandIndex,
+                              isAccColMajor);
+  MMASingleSubgroupLayout repLayout = getRepeatedSubgroupLayout(
+      attr.getIntrinsic(), operandIndex, attr.getRepeatsArray(),
+      isAccColMajor);
+
+  ArrayRef<ScaledMMADimKind> dimKinds = getOperandDimKinds(operandIndex);
+  for (size_t d = 0; d < baseLayout.outer.size(); d++) {
+    int64_t kindIdx = static_cast<int64_t>(dimKinds[d]);
+    int64_t baseElem = baseLayout.element[d];
+    if (repLayout.outer[d] > 1) {
+      offsets.push_back(0);
+      sizes.push_back(repLayout.outer[d]);
+    }
+    offsets.push_back(repeatIndices[kindIdx] * baseElem);
+    sizes.push_back(baseElem);
+  }
 }
 
 LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
@@ -1711,53 +1855,183 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
     return failure();
   }
 
-  SmallVector<VectorType> subgroupTypes;
-  getUndistributedTileTypes(subgroupTypes);
-
-  // Note: the scales argument is given as a vector of 4
-  // scales + a constant selector to say which byte in the vector is to be used.
-  // This'll allow better value reuse, hence why we extend to 4-vectors
-  // instead of clamping to scalars here.
-
+  // Scale handling helpers.
   FloatType f8E8M0 = builder.getF8E8M0Type();
+  int64_t scalesVecSize = getScalesVectorSize();
   Value zeroScales = arith::ConstantOp::create(
       builder, loc,
       SplatElementsAttr::get(
-          VectorType::get({getScalesVectorSize()}, f8E8M0),
+          VectorType::get({scalesVecSize}, f8E8M0),
           llvm::APFloat::getSmallest(f8E8M0.getFloatSemantics())));
-  auto padScales = [&](Value scales) {
-    Value scale = vector::ExtractOp::create(builder, loc, scales, 0);
-    Value padded = vector::InsertOp::create(builder, loc, scale, zeroScales, 0);
+
+  // Unified path: always use the multi-dim decomposition with repeat loops.
+  // When all repeats are 1, this reduces to a single ScaledMFMAOp.
+  SmallVector<int64_t, 4> reps = getRepeatsArray();
+  int64_t repM = reps[0], repN = reps[1], repK = reps[2], repKB = reps[3];
+
+  // Base intrinsic dimensions (not multiplied by repeats).
+  MMASingleSubgroupLayout baseLhsLayout =
+      getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandLhs);
+  MMASingleSubgroupLayout baseRhsLayout =
+      getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandRhs);
+  int64_t baseM = baseLhsLayout.outer[0] * baseLhsLayout.thread[0] *
+                  baseLhsLayout.element[0];
+  int64_t baseK = (baseLhsLayout.outer[1] * baseLhsLayout.thread[1] *
+                   baseLhsLayout.element[1]) *
+                  (baseLhsLayout.outer[2] * baseLhsLayout.thread[2] *
+                   baseLhsLayout.element[2]);
+  int64_t baseN = baseRhsLayout.outer[2] * baseRhsLayout.thread[2] *
+                  baseRhsLayout.element[2];
+
+  int64_t m = baseM, n = baseN, k = baseK;
+  if (getColMajor())
+    std::swap(m, n);
+
+  // Compute multi-dim shapes and shape_cast all operands from flat 1D.
+  SmallVector<Value> mdOperands;
+  for (int64_t opIdx = 0; opIdx <= kScaledMMAOperandAcc; opIdx++) {
+    Value operand = opIdx < 4 ? inputs[opIdx] : outputs[0];
+    SmallVector<int64_t> mdShape = getPerLaneMultiDimShape(*this, opIdx);
+    VectorType mdType = VectorType::get(
+        mdShape, cast<VectorType>(operand.getType()).getElementType());
+    mdOperands.push_back(
+        vector::ShapeCastOp::create(builder, loc, mdType, operand));
+  }
+
+  // Helper: extract a per-intrinsic sub-vector from a multi-dim operand.
+  auto extractSlice = [&](Value mdValue, int64_t opIdx,
+                          ArrayRef<int64_t> repeatIndices) -> Value {
+    SmallVector<int64_t> offsets, sizes;
+    getIntrinsicSliceOffsetsAndSizes(*this, opIdx, repeatIndices, offsets,
+                                    sizes);
+    SmallVector<int64_t> strides(offsets.size(), 1);
+    Value slice = vector::ExtractStridedSliceOp::create(
+        builder, loc, mdValue, offsets, sizes, strides);
+    int64_t numElements = 1;
+    for (int64_t s : sizes)
+      numElements *= s;
+    auto flatType = VectorType::get(
+        {numElements}, cast<VectorType>(mdValue.getType()).getElementType());
+    return vector::ShapeCastOp::create(builder, loc, flatType, slice);
+  };
+
+  // Helper: insert a per-intrinsic result back into multi-dim ACC.
+  auto insertSlice = [&](Value result1D, Value mdAcc,
+                         ArrayRef<int64_t> repeatIndices) -> Value {
+    SmallVector<int64_t> offsets, sizes;
+    getIntrinsicSliceOffsetsAndSizes(*this, kScaledMMAOperandAcc,
+                                    repeatIndices, offsets, sizes);
+    SmallVector<int64_t> strides(offsets.size(), 1);
+    auto sliceType = VectorType::get(
+        sizes, cast<VectorType>(result1D.getType()).getElementType());
+    Value mdResult =
+        vector::ShapeCastOp::create(builder, loc, sliceType, result1D);
+    return vector::InsertStridedSliceOp::create(builder, loc, mdResult, mdAcc,
+                                                offsets, strides);
+  };
+
+  // Helper: extract the full K-scale sub-vector for a given parallel
+  // (M or N) repeat position.  The K dimension element already includes
+  // K_rep, so all K scales for this position are contiguous.  The result
+  // is padded to scalesVecSize if needed.
+  auto extractScaleVec = [&](Value mdScale, int64_t scaleOpIdx,
+                             int64_t parallelRepIdx) -> Value {
+    MMASingleSubgroupLayout baseLayout =
+        getSingleSubgroupLayout(getIntrinsic(), scaleOpIdx);
+    MMASingleSubgroupLayout repLayout =
+        getRepeatedSubgroupLayout(getIntrinsic(), scaleOpIdx, reps);
+    ArrayRef<ScaledMMADimKind> dimKinds = getOperandDimKinds(scaleOpIdx);
+
+    SmallVector<int64_t> offsets, sizes;
+    for (size_t d = 0; d < baseLayout.outer.size(); d++) {
+      ScaledMMADimKind kind = dimKinds[d];
+      if (kind == ScaledMMADimKind::K || kind == ScaledMMADimKind::KB) {
+        offsets.push_back(0);
+        sizes.push_back(repLayout.element[d]);
+      } else {
+        offsets.push_back(parallelRepIdx * baseLayout.element[d]);
+        sizes.push_back(baseLayout.element[d]);
+      }
+    }
+
+    SmallVector<int64_t> strides(offsets.size(), 1);
+    Value slice = vector::ExtractStridedSliceOp::create(
+        builder, loc, mdScale, offsets, sizes, strides);
+    int64_t numElems = 1;
+    for (int64_t s : sizes)
+      numElems *= s;
+    auto flatType = VectorType::get(
+        {numElems}, cast<VectorType>(mdScale.getType()).getElementType());
+    Value flatVec =
+        vector::ShapeCastOp::create(builder, loc, flatType, slice);
+
+    if (numElems >= scalesVecSize)
+      return flatVec;
+    Value padded = zeroScales;
+    for (int64_t i = 0; i < numElems; i++) {
+      Value elem = vector::ExtractOp::create(builder, loc, flatVec, i);
+      padded = vector::InsertOp::create(builder, loc, elem, padded, i);
+    }
     return padded;
   };
 
-  Value lhs = inputs[kScaledMMAOperandLhs];
-  Value rhs = inputs[kScaledMMAOperandRhs];
-  Value lhsScales = padScales(inputs[kScaledMMAOperandLhsScale]);
-  Value rhsScales = padScales(inputs[kScaledMMAOperandRhsScale]);
-  Value acc = outputs[0];
+  Value mdAcc = mdOperands[kScaledMMAOperandAcc];
 
-  ArrayRef<int64_t> lhsShape = subgroupTypes[kScaledMMAOperandLhs].getShape();
-  ArrayRef<int64_t> rhsShape = subgroupTypes[kScaledMMAOperandRhs].getShape();
-  int64_t m = lhsShape[0];
-  // We use m x [k / kPerBlock] x blockSize as the LHS pre-distribution shape
-  // since this makes the higher-level tiling clearer.
-  int64_t k = lhsShape[1] * lhsShape[2];
-  int64_t n = rhsShape[2];
+  // Iterate: M and N are parallel (independent sub-tiles), K and KB are
+  // reduction (chained through the accumulator).
+  for (int64_t rm = 0; rm < repM; rm++) {
+    for (int64_t rn = 0; rn < repN; rn++) {
+      SmallVector<int64_t> accRepIdx = {rm, rn, 0, 0};
+      Value accSlice = extractSlice(mdAcc, kScaledMMAOperandAcc, accRepIdx);
 
-  // Since the LHS and RHS layouts are both {M,N}xK, we can get a column-major
-  // result just by swapping the LHS and RHS.
-  if (getColMajor()) {
-    std::swap(lhs, rhs);
-    std::swap(lhsScales, rhsScales);
-    std::swap(n, m);
+      // Extract full K-scale sub-vectors once per (rm, rn).  With repeats
+      // folded into the element field, all K scales are contiguous and can
+      // be loaded as a single wider access.
+      Value lhsScaleVec = extractScaleVec(
+          mdOperands[kScaledMMAOperandLhsScale],
+          kScaledMMAOperandLhsScale, rm);
+      Value rhsScaleVec = extractScaleVec(
+          mdOperands[kScaledMMAOperandRhsScale],
+          kScaledMMAOperandRhsScale, rn);
+
+      for (int64_t rk = 0; rk < repK; rk++) {
+        for (int64_t rkb = 0; rkb < repKB; rkb++) {
+          SmallVector<int64_t> repIdx = {rm, rn, rk, rkb};
+
+          Value lhsSlice =
+              extractSlice(mdOperands[kScaledMMAOperandLhs],
+                           kScaledMMAOperandLhs, repIdx);
+          Value rhsSlice =
+              extractSlice(mdOperands[kScaledMMAOperandRhs],
+                           kScaledMMAOperandRhs, repIdx);
+
+          Value curLhs = lhsSlice;
+          Value curRhs = rhsSlice;
+          Value curLhsScales = lhsScaleVec;
+          Value curRhsScales = rhsScaleVec;
+          int64_t scalesIdxA = rk;
+          int64_t scalesIdxB = rk;
+
+          if (getColMajor()) {
+            std::swap(curLhs, curRhs);
+            std::swap(curLhsScales, curRhsScales);
+            std::swap(scalesIdxA, scalesIdxB);
+          }
+
+          accSlice = amdgpu::ScaledMFMAOp::create(
+              builder, loc, m, n, k, curLhs, curRhs, accSlice, curLhsScales,
+              curRhsScales, scalesIdxA, scalesIdxB);
+        }
+      }
+
+      mdAcc = insertSlice(accSlice, mdAcc, accRepIdx);
+    }
   }
 
-  Value result =
-      amdgpu::ScaledMFMAOp::create(builder, loc, m, n, k, lhs, rhs, acc,
-                                   lhsScales, rhsScales, /*scalesIdxA=*/0,
-                                   /*scalesIdxB=*/0);
-  results.push_back(result);
+  // Shape_cast the multi-dim ACC back to flat 1D.
+  Value flatResult = vector::ShapeCastOp::create(
+      builder, loc, threadTypes[kScaledMMAOperandAcc], mdAcc);
+  results.push_back(flatResult);
   return success();
 }
 

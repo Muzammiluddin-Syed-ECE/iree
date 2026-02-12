@@ -15,8 +15,10 @@ iree_lit_test_suite(
     lit
   SRCS
     "combine_barrier_regions.mlir"
+    "decompose_repeats.mlir"
     "distribute_inner_tiled_to_lanes.mlir"
     "expand_undistributed_inner_tiles.mlir"
+    "unroll_to_intrinsics.mlir"
   TOOLS
     FileCheck
     iree-opt

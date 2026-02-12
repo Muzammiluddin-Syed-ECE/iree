@@ -15,6 +15,26 @@ def CombineBarrierRegionsPass :
   let dependentDialects = ["::mlir::iree_compiler::IREE::GPU::IREEGPUDialect"];
 }
 
+def DecomposeRepeatsPass :
+    InterfacePass<"iree-gpu-decompose-repeats", "mlir::FunctionOpInterface"> {
+  let summary = "Decomposes grouped inner tiles introduced by the `repeats` attribute";
+  let description = [{
+    Decomposes `iree_codegen.inner_tiled` ops whose intrinsic kind carries a
+    `repeats` attribute into multiple base-intrinsic inner_tiled ops.  Each
+    grouped tile is sliced along the repeated dimensions using
+    `tensor.extract_slice`, with parallel repeat dimensions (M, N) producing
+    independent sub-tiles and reduction repeat dimensions (K, KB) chaining
+    through the accumulator.
+
+    This pass must run before lane distribution so that the inner tiles are
+    still in their full undistributed shapes (tensor semantics).
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::tensor::TensorDialect",
+  ];
+}
+
 def DistributeInnerTiledToLanesPass :
     InterfacePass<"iree-gpu-distribute-inner-tiled-to-lanes", "mlir::FunctionOpInterface"> {
   let summary = "Distributes iree_codegen.inner_tiled ops to lanes";

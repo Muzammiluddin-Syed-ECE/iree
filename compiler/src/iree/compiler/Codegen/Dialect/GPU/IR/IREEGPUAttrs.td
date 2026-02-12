@@ -599,6 +599,7 @@ def IREEGPU_ScaledMMAAttr :
     "getDistributionWorkerCount",
     "getOperandIteratorTypes",
     "buildUnderlyingOperations",
+    "getRepeatsArray",
   ]>
 ]> {
   let mnemonic = "scaled_mma_layout";
@@ -615,6 +616,12 @@ def IREEGPU_ScaledMMAAttr :
     operations allow arbitrary combinations of fp4/fp6/fp8 inputs.
 
     This intrinsic takes its four parameters as (lhs, lhs_scale, rhs, rhs_scale).
+
+    The optional |repeats| parameter specifies how many times the base
+    intrinsic is logically grouped along [M, N, K, KB]. For example,
+    `repeats = [1, 1, 4, 1]` groups 4 K-steps into one logical unit, which
+    enables packing of block scales (e.g., 4 × 1-byte → 1 × 4-byte load
+    for MXFP4 GEMMs). When absent, defaults to `[1, 1, 1, 1]`.
   }];
 
   let assemblyFormat = "`<` struct(params) `>`";
@@ -624,7 +631,8 @@ def IREEGPU_ScaledMMAAttr :
     "::mlir::Type":$lhs_elem_type,
     "::mlir::Type":$rhs_elem_type,
     "::mlir::Type":$acc_elem_type,
-    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major
+    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major,
+    OptionalParameter<"::mlir::DenseI64ArrayAttr">:$repeats
   );
 
   let extraClassDeclaration = [{
@@ -645,12 +653,21 @@ def IREEGPU_ScaledMMAAttr :
     // Return preferred subgroup size
     int64_t getSubgroupSize() const;
 
-    /// Returns the shape of the scaled MMA operation:
+    /// Returns the **effective** shape of the scaled MMA operation, i.e.
+    /// the base intrinsic shape multiplied by `repeats`. For example, with
+    /// `repeats = [1, 1, 4, 1]` on a base 16x16x4x32 intrinsic this
+    /// returns {16, 16, 16, 32} (K = 4*4 = 16).
+    ///
     /// ```
     ///   C += A * B
     /// ```
     /// Where, up to some transpositions, `A` has shape `<M, K, KB>`, `B`
     /// has shape `<K, KB, N>`, and `C` has shape `<M, N>`.
+    ///
+    /// All current callers (pack-to-intrinsics, config heuristics, padding)
+    /// expect the effective shape. If the raw hardware intrinsic shape is
+    /// needed, construct a base-kind copy with `repeats = nullptr` and
+    /// call `getScaledMNKShape()` on that.
     ::std::tuple<int64_t, int64_t, int64_t, int64_t>
     getScaledMNKShape() const {
       ::llvm::SmallVector<::mlir::VectorType> preThreadTypes;
@@ -659,7 +676,27 @@ def IREEGPU_ScaledMMAAttr :
       ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
       return {accShape[0], accShape[1], lhsShape[1], lhsShape[2]};
     }
+
+    /// Returns the M/N/K/KB classification for each logical dimension of
+    /// each operand's undistributed inner tile. This exposes the dimension
+    /// semantics that are implicit in getUndistributedTileTypes():
+    ///   LHS:       [M, K, KB]
+    ///   RHS:       [K, KB, N]
+    ///   LHS_scale: [M, K]
+    ///   RHS_scale: [K, N]
+    ///   ACC:       [M, N]
+    void getInnerDimKinds(
+        ::llvm::SmallVectorImpl<
+            ::llvm::SmallVector<ScaledMMADimKind>> &result) const;
+
+    /// Returns the iterator type (parallel or reduction) for each repeat
+    /// dimension. For ScaledMMAAttr this is 4 entries: [M, N, K, KB] →
+    /// [parallel, parallel, reduction, reduction].
+    void getInnerIteratorTypes(
+        ::llvm::SmallVectorImpl<::mlir::utils::IteratorType> &result) const;
   }];
+
+  let genVerifyDecl = 1;
 }
 
 //===----------------------------------------------------------------------===//

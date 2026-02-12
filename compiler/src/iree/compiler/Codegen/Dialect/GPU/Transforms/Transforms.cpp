@@ -1689,6 +1689,340 @@ struct OffsetMapInfo {
   }
 };
 
+/// Decomposes an inner_tiled op whose kind has repeats != [1,1,1] into a
+/// sequence of base-intrinsic inner_tiled ops. This pattern is intended to run
+/// AFTER the standard outer-dimension unrolling so that every inner_tiled op
+/// has unit outer dims.  It then slices the grouped inner tile into individual
+/// base-intrinsic tiles using vector::ExtractStridedSliceOp.
+///
+/// Arbitrary repeats are supported:
+///   - Reduction-dimension repeats (K) are accumulated through the ACC.
+///   - Parallel-dimension repeats (M, N) produce sub-tiles at different
+///     positions in the result, assembled with vector::InsertStridedSliceOp.
+///
+/// For example, with repeats=[1,1,4,1] on MFMA_SCALE_F32_16x16x128_B32, the
+/// grouped kScale=16 tile is decomposed into 4 base kScale=4 ops chained
+/// through the accumulator.  With repeats=[2,2,1,1] the 32x32 output tile is
+/// split into four 16x16 sub-tiles at independent positions.
+struct DecomposeRepeatsPattern
+    : public OpRewritePattern<Codegen::InnerTiledOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(Codegen::InnerTiledOp tiledOp,
+                                PatternRewriter &rewriter) const override {
+    if (!tiledOp.hasTensorSemantics()) {
+      return rewriter.notifyMatchFailure(tiledOp, "requires tensor semantics");
+    }
+
+    auto kind = tiledOp.getKind();
+    if (!kind.hasRepeats()) {
+      return rewriter.notifyMatchFailure(tiledOp, "no repeats to decompose");
+    }
+
+    auto smmaKind = dyn_cast<IREE::GPU::ScaledMMAAttr>(kind);
+    if (!smmaKind) {
+      return rewriter.notifyMatchFailure(
+          tiledOp, "only ScaledMMAAttr repeats are supported");
+    }
+
+    SmallVector<int64_t, 4> repeats = smmaKind.getRepeatsArray();
+    if (llvm::all_of(repeats, [](int64_t v) { return v == 1; })) {
+      return rewriter.notifyMatchFailure(tiledOp, "repeats are all 1");
+    }
+
+    if (tiledOp.getNumResults() != 1) {
+      return rewriter.notifyMatchFailure(
+          tiledOp, "only single-result inner_tiled ops supported");
+    }
+
+    // ---------------------------------------------------------------
+    // 1. Create a base kind with M/N repeats removed but K/KB
+    //    preserved.  K and KB reduction repeats are handled inside
+    //    buildUnderlyingOperations (which emits one ScaledMFMAOp per
+    //    K/KB repeat with the correct scalesIdx), so we must NOT
+    //    decompose them here.
+    // ---------------------------------------------------------------
+    int64_t numRepeatDims = repeats.size(); // 4 for ScaledMMAAttr (M, N, K, KB)
+    SmallVector<int64_t> baseRepeats(numRepeatDims, 1);
+    baseRepeats[2] = repeats[2]; // preserve K
+    baseRepeats[3] = repeats[3]; // preserve KB
+    bool allBaseRepeatsOne =
+        llvm::all_of(baseRepeats, [](int64_t v) { return v == 1; });
+    auto baseKind = IREE::GPU::ScaledMMAAttr::get(
+        tiledOp.getContext(), smmaKind.getIntrinsic(),
+        smmaKind.getLhsElemType(), smmaKind.getRhsElemType(),
+        smmaKind.getAccElemType(), smmaKind.getColMajor(),
+        allBaseRepeatsOne
+            ? nullptr
+            : DenseI64ArrayAttr::get(tiledOp.getContext(), baseRepeats));
+
+    SmallVector<VectorType> baseTiles;
+    baseKind.getUndistributedTileTypes(baseTiles);
+
+    int64_t numOperands = tiledOp.getNumOperands();
+    int64_t numInputs = tiledOp.getNumInputs();
+    int64_t accIndex = numOperands - 1;
+    std::optional<ArrayAttr> permsAttr = tiledOp.getPermutations();
+
+    // ---------------------------------------------------------------
+    // 2. Get the M/N/K/KB classification for each operand's logical
+    //    inner dimensions directly from the attribute, then convert to
+    //    repeat indices (M=0, N=1, K=2, KB=3).
+    // ---------------------------------------------------------------
+    SmallVector<SmallVector<IREE::GPU::ScaledMMADimKind>> dimKinds;
+    smmaKind.getInnerDimKinds(dimKinds);
+
+    // logicalToRepeat[op][logDim] = repeat index (0..numRepeatDims-1).
+    SmallVector<SmallVector<int64_t>> logicalToRepeat(numOperands);
+    for (int64_t op = 0; op < numOperands; ++op) {
+      logicalToRepeat[op].resize(dimKinds[op].size());
+      for (int64_t d = 0, e = dimKinds[op].size(); d < e; ++d) {
+        logicalToRepeat[op][d] =
+            static_cast<int64_t>(dimKinds[op][d]); // M=0, N=1, K=2, KB=3
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 3. Convert logical mapping → physical mapping via permutations.
+    //    The inner_tiled op may permute operand dimensions (e.g. the
+    //    logical LHS layout [M, K, KB] could be physically stored as
+    //    [KB, M, K]). physInfo maps each physical tensor dimension to
+    //    its repeat index and base (non-repeated) size so that the
+    //    extract/insert helpers can compute offsets on the actual tensor.
+    // ---------------------------------------------------------------
+    struct PhysDimInfo {
+      int64_t repeatIdx; // index into the repeats array (M=0, N=1, K=2, KB=3)
+      int64_t baseSize;  // size of this dim in the base (single-intrinsic) tile
+    };
+    SmallVector<SmallVector<PhysDimInfo>> physInfo(numOperands);
+    for (int64_t op = 0; op < numOperands; ++op) {
+      int64_t innerRank = baseTiles[op].getRank();
+      physInfo[op].resize(innerRank);
+      // Default identity permutation.
+      SmallVector<int64_t> perm(innerRank);
+      std::iota(perm.begin(), perm.end(), 0);
+      if (permsAttr && *permsAttr) {
+        perm = SmallVector<int64_t>(
+            cast<DenseI64ArrayAttr>((*permsAttr)[op]).asArrayRef());
+      }
+
+      for (int64_t physDim = 0; physDim < innerRank; ++physDim) {
+        int64_t logDim = perm[physDim];
+        physInfo[op][physDim] = {logicalToRepeat[op][logDim],
+                                 baseTiles[op].getDimSize(logDim)};
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 4. Get iterator types (parallel / reduction) for each repeat dim
+    //    directly from the attribute.
+    // ---------------------------------------------------------------
+    SmallVector<utils::IteratorType> innerIterTypes;
+    smmaKind.getInnerIteratorTypes(innerIterTypes);
+
+    // ---------------------------------------------------------------
+    // 5. Iterate over all repeat combinations:
+    //       for each (mIdx, nIdx, ...):        // parallel
+    //         for each (kIdx, ...):             // reduction (chained)
+    //           extract slices, create base op
+    //         insert result at parallel position
+    //
+    //    With tensor semantics, operands have shape
+    //    [outer_0, ..., outer_k, inner_0, ..., inner_n].
+    //    We extract/insert on the inner dims while preserving the
+    //    outer dims.
+    // ---------------------------------------------------------------
+    Location loc = tiledOp.getLoc();
+
+    // Helper: build tensor.extract_slice that preserves outer dims and
+    // slices inner dims according to the repeat indices.
+    auto extractOperandSlice = [&](Value operand, int64_t opIdx,
+                                   ArrayRef<int64_t> repIndices) -> Value {
+      auto tensorType = cast<RankedTensorType>(operand.getType());
+      int64_t outerRank = tiledOp.getOperandOuterRank(opIdx);
+      int64_t totalRank = tensorType.getRank();
+
+      SmallVector<OpFoldResult> offsets(totalRank, rewriter.getIndexAttr(0));
+      SmallVector<OpFoldResult> sizes;
+      SmallVector<OpFoldResult> strides(totalRank, rewriter.getIndexAttr(1));
+
+      for (int64_t d = 0; d < totalRank; ++d) {
+        sizes.push_back(rewriter.getIndexAttr(tensorType.getDimSize(d)));
+      }
+
+      for (int64_t physDim = 0, e = physInfo[opIdx].size(); physDim < e;
+           ++physDim) {
+        auto &pi = physInfo[opIdx][physDim];
+        if (pi.repeatIdx >= 0) {
+          int64_t absDim = outerRank + physDim;
+          offsets[absDim] =
+              rewriter.getIndexAttr(repIndices[pi.repeatIdx] * pi.baseSize);
+          sizes[absDim] = rewriter.getIndexAttr(pi.baseSize);
+        }
+      }
+
+      auto sliceOp = tensor::ExtractSliceOp::create(rewriter, loc, operand,
+                                                    offsets, sizes, strides);
+      // Prevent FoldSwizzleHintOpWithExtractSliceOp from replacing this slice
+      // with a new tensor.empty so we keep one shared buffer and avoid
+      // inferring multiple private allocs.
+      sliceOp->setAttr("iree_gpu.from_decompose_repeats",
+                       rewriter.getUnitAttr());
+      return sliceOp.getResult();
+    };
+
+    // Helper: insert a sub-tile into the full result tensor at the parallel
+    // position given by repIndices (only parallel dims are used).
+    auto insertAccSlice = [&](Value fullResult, Value subTile,
+                              ArrayRef<int64_t> repIndices) -> Value {
+      auto tensorType = cast<RankedTensorType>(fullResult.getType());
+      int64_t outerRank = tiledOp.getOperandOuterRank(accIndex);
+      int64_t totalRank = tensorType.getRank();
+      auto subTileType = cast<RankedTensorType>(subTile.getType());
+
+      SmallVector<OpFoldResult> offsets(totalRank, rewriter.getIndexAttr(0));
+      SmallVector<OpFoldResult> sizes;
+      SmallVector<OpFoldResult> strides(totalRank, rewriter.getIndexAttr(1));
+
+      for (int64_t d = 0; d < totalRank; ++d) {
+        sizes.push_back(rewriter.getIndexAttr(subTileType.getDimSize(d)));
+      }
+
+      for (int64_t physDim = 0, e = physInfo[accIndex].size(); physDim < e;
+           ++physDim) {
+        auto &pi = physInfo[accIndex][physDim];
+        if (pi.repeatIdx >= 0 &&
+            innerIterTypes[pi.repeatIdx] == utils::IteratorType::parallel) {
+          int64_t absDim = outerRank + physDim;
+          offsets[absDim] =
+              rewriter.getIndexAttr(repIndices[pi.repeatIdx] * pi.baseSize);
+        }
+      }
+
+      return tensor::InsertSliceOp::create(rewriter, loc, subTile, fullResult,
+                                           offsets, sizes, strides);
+    };
+
+    // Build the parallel and reduction index ranges.
+    // K (idx 2) and KB (idx 3) are skipped — their repeats are preserved
+    // on the baseKind and handled by buildUnderlyingOperations, which emits
+    // separate ScaledMFMAOps with the correct scalesIdx for scale packing.
+    SmallVector<int64_t> parallelDims, reductionDims;
+    for (int64_t r = 0; r < numRepeatDims; ++r) {
+      if (repeats[r] <= 1) {
+        continue;
+      }
+      if (r == 2 || r == 3) {
+        continue;
+      }
+      if (innerIterTypes[r] == utils::IteratorType::reduction) {
+        reductionDims.push_back(r);
+      } else {
+        parallelDims.push_back(r);
+      }
+    }
+
+    if (parallelDims.empty() && reductionDims.empty()) {
+      return rewriter.notifyMatchFailure(
+          tiledOp, "only K/KB repeats remain; handled by lowering");
+    }
+
+    // Flat Cartesian iteration: for each parallel position, chain through
+    // all reduction combinations.
+    SmallVector<int64_t> repIndices(numRepeatDims, 0);
+
+    // The result tensor starts as the original accumulator (output).
+    // For parallel dims, each sub-tile result is inserted at the appropriate
+    // position. For pure-reduction (no parallel dims), the accumulator is
+    // threaded through all reduction steps and becomes the result directly.
+    Value result = tiledOp.getOutputs().front();
+
+    // Iterate over all parallel index combinations.
+    SmallVector<int64_t> parallelBounds;
+    for (int64_t r : parallelDims) {
+      parallelBounds.push_back(repeats[r]);
+    }
+    SmallVector<int64_t> reductionBounds;
+    for (int64_t r : reductionDims) {
+      reductionBounds.push_back(repeats[r]);
+    }
+
+    // Generate flat iteration over the Cartesian product of parallel dims.
+    int64_t numParallelIters = 1;
+    for (int64_t b : parallelBounds) {
+      numParallelIters *= b;
+    }
+    int64_t numReductionIters = 1;
+    for (int64_t b : reductionBounds) {
+      numReductionIters *= b;
+    }
+
+    for (int64_t pFlat = 0; pFlat < numParallelIters; ++pFlat) {
+      // Unflatten parallel index.
+      int64_t tmp = pFlat;
+      for (int64_t i = parallelDims.size() - 1; i >= 0; --i) {
+        repIndices[parallelDims[i]] = tmp % parallelBounds[i];
+        tmp /= parallelBounds[i];
+      }
+
+      // Extract the ACC sub-tile at this parallel position.
+      Value acc = extractOperandSlice(result, accIndex, repIndices);
+
+      // Chain through all reduction combinations.
+      for (int64_t rFlat = 0; rFlat < numReductionIters; ++rFlat) {
+        tmp = rFlat;
+        for (int64_t i = reductionDims.size() - 1; i >= 0; --i) {
+          repIndices[reductionDims[i]] = tmp % reductionBounds[i];
+          tmp /= reductionBounds[i];
+        }
+
+        // Slice all input operands.
+        SmallVector<Value> inputSlices;
+        for (int64_t inputIdx = 0; inputIdx < numInputs; ++inputIdx) {
+          inputSlices.push_back(extractOperandSlice(
+              tiledOp.getInputs()[inputIdx], inputIdx, repIndices));
+        }
+
+        // Create base inner_tiled op.
+        auto newOp = Codegen::InnerTiledOp::create(
+            rewriter, loc,
+            /*inputs=*/inputSlices,
+            /*inits=*/ValueRange{acc}, tiledOp.getIndexingMaps(),
+            tiledOp.getIteratorTypes(),
+            /*intrinsic=*/baseKind, tiledOp.getSemantics(),
+            tiledOp.getPermutations());
+
+        // Propagate lowering config so subgroup tiling still targets these ops.
+        // Without this, the new ops would not be tiled at subgroup level and the
+        // resulting lane foralls would lack a parent subgroup forall, failing
+        // GPUVerifyDistributionPass.
+        if (auto config = getLoweringConfig(tiledOp)) {
+          setLoweringConfig(newOp, config);
+        }
+
+        acc = newOp.getResult(0);
+      }
+
+      // Insert the accumulated sub-tile at this parallel position.
+      // When there are no parallel dims the final acc is the full result.
+      if (!parallelDims.empty()) {
+        result = insertAccSlice(result, acc, repIndices);
+      } else {
+        result = acc;
+      }
+    }
+
+    rewriter.replaceOp(tiledOp, result);
+    return success();
+  }
+};
+} // namespace
+
+void populateDecomposeRepeatsPatterns(RewritePatternSet &patterns) {
+  patterns.add<DecomposeRepeatsPattern>(patterns.getContext());
+}
+
+namespace {
 struct UnrollInnerTiledPattern
     : public OpRewritePattern<Codegen::InnerTiledOp> {
   UnrollInnerTiledPattern(MLIRContext *context,
@@ -2106,6 +2440,13 @@ struct FoldSwizzleHintOpWithExtractSliceOp final
   using Base::Base;
   LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
                                 PatternRewriter &rewriter) const override {
+    // Skip slices created by DecomposeRepeatsPattern so we keep one promoted
+    // buffer and use extract_slice views; folding would create one new empty
+    // per slice and cause GPUInferMemorySpace to mark them private.
+    if (sliceOp->hasAttr("iree_gpu.from_decompose_repeats")) {
+      return failure();
+    }
+
     // Check for swizzle_hint op source.
     auto swizzleHintOp =
         sliceOp.getSource().getDefiningOp<IREE::Codegen::SwizzleHintOp>();
