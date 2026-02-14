@@ -49,6 +49,7 @@ iree_cc_library(
     "Transforms.h"
   SRCS
     "CombineBarrierRegions.cpp"
+    "DecomposeRepeats.cpp"
     "DistributeInnerTiledToLanes.cpp"
     "ExpandUndistributedInnerTiles.cpp"
     "LowerIREEGPUOps.cpp"

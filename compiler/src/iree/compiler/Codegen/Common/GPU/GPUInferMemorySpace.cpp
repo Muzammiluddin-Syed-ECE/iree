@@ -6,11 +6,14 @@
 
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -34,14 +37,71 @@ struct GPUInferMemorySpacePass final
   void runOnOperation() override;
 };
 
+/// Returns true if \p v is the destination of a linalg.copy that has
+/// UseGlobalLoadDMAAttr, possibly through a tensor.expand_shape.
+static bool isDestOfCopyWithDMA(Value v) {
+  for (Operation *user : v.getUsers()) {
+    if (auto copy = dyn_cast<linalg::CopyOp>(user)) {
+      if (copy.getDpsInitOperand(0)->get() == v &&
+          getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(copy)) {
+        return true;
+      }
+    }
+    if (auto expand = dyn_cast<tensor::ExpandShapeOp>(user)) {
+      if (isDestOfCopyWithDMA(expand.getResult())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/// Returns true if all users of \p v indicate shared memory usage: either
+/// thread/warp-mapped scf.forall ops, linalg.copy with DMA, expand_shape
+/// leading to copy with DMA, or further swizzle hints whose results also
+/// indicate shared memory usage.
+static bool allUsersIndicateShared(Value v) {
+  for (Operation *user : v.getUsers()) {
+    if (isa<linalg::CopyOp>(user) &&
+        getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(user)) {
+      continue;
+    }
+    if (auto expand = dyn_cast<tensor::ExpandShapeOp>(user)) {
+      if (isDestOfCopyWithDMA(expand.getResult())) {
+        continue;
+      }
+    }
+    auto forallOp = dyn_cast<scf::ForallOp>(user);
+    if (forallOp &&
+        forallOpHasMappingType<gpu::GPUThreadMappingAttr,
+                               gpu::GPUWarpMappingAttr>(forallOp)) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 bool isDefinitelyShared(bufferization::AllocTensorOp alloc) {
   // An allocation can be inferred as shared if it is the destination of a
-  // thread distributed `scf.forall` op. All other shared allocations are
-  // expected to be properly indicated in advance.
+  // thread distributed `scf.forall` op, or if it is used only by a
+  // SwizzleHintOp whose result (possibly through expand_shape) is the
+  // destination of a linalg.copy with UseGlobalLoadDMAAttr (promoted LDS),
+  // or the shared_outs of a thread/warp distributed scf.forall.
+  // All other shared allocations are expected to be properly indicated in
+  // advance.
   for (auto user : alloc->getUsers()) {
     if (isa<linalg::CopyOp>(user) &&
         getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(user)) {
       continue;
+    }
+
+    // alloc -> SwizzleHintOp -> [expand_shape] -> copy dest with DMA: shared.
+    // alloc -> SwizzleHintOp -> scf.forall (thread/warp mapped): shared.
+    if (auto swizzle = dyn_cast<IREE::Codegen::SwizzleHintOp>(user)) {
+      if (allUsersIndicateShared(swizzle.getResult())) {
+        continue;
+      }
     }
 
     auto forallOp = dyn_cast<scf::ForallOp>(user);
