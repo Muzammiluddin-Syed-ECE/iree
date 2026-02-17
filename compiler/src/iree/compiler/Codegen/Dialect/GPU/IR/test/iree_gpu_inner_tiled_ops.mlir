@@ -388,7 +388,7 @@ func.func @vector_scaled_multi_mma(%lhs: vector<2x3x1x32xf4E2M1FN>, %rhs: vector
  affine_map<(i, j, k, b) -> (k, j)>,
  affine_map<(i, j, k, b) -> (i, j)>
 ]
-func.func @vector_scaled_multi_mma_with_k_repeats(%lhs: vector<2x3x1x32xf4E2M1FN>, %rhs: vector<3x1x5x32xf8E4M3FN>, %lhsScale: vector<2x3x1xf8E8M0FNU>,%rhsScale: vector<3x5x1xf8E8M0FNU>,
+func.func @vector_scaled_multi_mma_with_k_repeats(%lhs: vector<2x3x1x128xf4E2M1FN>, %rhs: vector<3x1x5x128xf8E4M3FN>, %lhsScale: vector<2x3x4xf8E8M0FNU>,%rhsScale: vector<3x5x4xf8E8M0FNU>,
     %acc: vector<2x5x4xf32>) -> vector<2x5x4xf32> {
   %0 = iree_codegen.inner_tiled ins(%lhs, %rhs, %lhsScale, %rhsScale) outs(%acc) {
     indexing_maps = #contraction_accesses,
@@ -400,7 +400,7 @@ func.func @vector_scaled_multi_mma_with_k_repeats(%lhs: vector<2x3x1x32xf4E2M1FN
       acc_elem_type = f32,
       repeats = [1, 1, 4, 1]>,
     semantics = #iree_gpu.mma_semantics<distributed = true, opaque = false>
-  } : vector<2x3x1x32xf4E2M1FN>, vector<3x1x5x32xf8E4M3FN>, vector<2x3x1xf8E8M0FNU>, vector<3x5x1xf8E8M0FNU>
+  } : vector<2x3x1x128xf4E2M1FN>, vector<3x1x5x128xf8E4M3FN>, vector<2x3x4xf8E8M0FNU>, vector<3x5x4xf8E8M0FNU>
     into vector<2x5x4xf32>
   return %0 : vector<2x5x4xf32>
 }
@@ -416,7 +416,7 @@ func.func @vector_scaled_multi_mma_with_k_repeats(%lhs: vector<2x3x1x32xf4E2M1FN
 //  CHECK-SAME:       indexing_maps = [#[[$MAP]], #[[$MAP1]], #[[$MAP2]], #[[$MAP3]], #[[$MAP4]]]
 //  CHECK-SAME:       iterator_types = [#linalg.iterator_type<parallel>, #linalg.iterator_type<parallel>, #linalg.iterator_type<reduction>, #linalg.iterator_type<reduction>]
 //  CHECK-SAME:       kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, repeats = [1, 1, 4, 1]>
-//  CHECK-SAME:     : vector<2x3x1x32xf4E2M1FN>, vector<3x1x5x32xf8E4M3FN>, vector<2x3x1xf8E8M0FNU>, vector<3x5x1xf8E8M0FNU> into vector<2x5x4xf32>
+//  CHECK-SAME:     : vector<2x3x1x128xf4E2M1FN>, vector<3x1x5x128xf8E4M3FN>, vector<2x3x4xf8E8M0FNU>, vector<3x5x4xf8E8M0FNU> into vector<2x5x4xf32>
 
 // -----
 

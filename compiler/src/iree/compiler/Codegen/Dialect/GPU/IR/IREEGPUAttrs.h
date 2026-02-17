@@ -300,6 +300,14 @@ MMASingleSubgroupLayout getSingleSubgroupLayout(ScaledMMAIntrinsic intrinsic,
                                                 int64_t operandIndex,
                                                 bool isAccColMajor);
 
+/// Returns a subgroup layout with the `element` fields scaled by the
+/// corresponding repeat factors.  The repeat-to-dimension mapping uses
+/// ScaledMMADimKind: repeats = [M, N, K, KB], operand dims vary per operand.
+MMASingleSubgroupLayout
+getRepeatedSubgroupLayout(ScaledMMAIntrinsic intrinsic, int64_t operandIndex,
+                          ArrayRef<int64_t> repeats,
+                          bool isAccColMajor = false);
+
 /// Returns the name of the tilling `level`, as used in the `lowering_config`
 /// attribute.
 StringRef getTilingLevelName(GPU::TilingLevel level);
