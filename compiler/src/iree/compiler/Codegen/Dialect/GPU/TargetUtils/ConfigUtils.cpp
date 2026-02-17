@@ -932,7 +932,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
         kind = IREE::GPU::ScaledMMAAttr::get(
             ctx, smma.getIntrinsic(), smma.getLhsElemType(),
             smma.getRhsElemType(), smma.getAccElemType(), smma.getColMajor(),
-            DenseI64ArrayAttr::get(ctx, {1, 1, 1, 1}));
+            DenseI64ArrayAttr::get(ctx, {1, 1, 4, 1}));
       }
     }
   }
