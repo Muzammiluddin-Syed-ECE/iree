@@ -527,15 +527,15 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
     funcPassManager.addPass(createGPUApplyTilingLevelPass(options));
   }
 
-  // Step 4.1. Decompose grouped inner tiles (repeats > 1) into individual
-  // base-intrinsic inner_tiled ops.  Placed after subgroup tiling so that the
-  // accumulator fill is already per-subgroup (keeping it in registers) rather
-  // than a workgroup-level shared allocation.  The inner_tiled ops still have
-  // undistributed tensor semantics at this point (DistributeInnerTiledToLanes
-  // hasn't run yet).
-  funcPassManager.addPass(IREE::GPU::createDecomposeRepeatsPass());
-  funcPassManager.addPass(createCanonicalizerPass());
-  funcPassManager.addPass(createCSEPass());
+  // // Step 4.1. Decompose grouped inner tiles (repeats > 1) into individual
+  // // base-intrinsic inner_tiled ops.  Placed after subgroup tiling so that the
+  // // accumulator fill is already per-subgroup (keeping it in registers) rather
+  // // than a workgroup-level shared allocation.  The inner_tiled ops still have
+  // // undistributed tensor semantics at this point (DistributeInnerTiledToLanes
+  // // hasn't run yet).
+  // funcPassManager.addPass(IREE::GPU::createDecomposeRepeatsPass());
+  // funcPassManager.addPass(createCanonicalizerPass());
+  // funcPassManager.addPass(createCSEPass());
 
   funcPassManager.addPass(IREE::GPU::createDistributeInnerTiledToLanesPass());
 
