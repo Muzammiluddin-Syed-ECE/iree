@@ -507,3 +507,53 @@ module attributes { transform.with_named_sequence } {
 //  CHECK: %[[RHS_SCALE_LONG:.+]] = vector.insert %[[RHS_SCALE_SCALAR]], %[[CST]] [0]
 //  CHECK: amdgpu.scaled_mfma 32x32x64 (%[[LHS_SCALE_LONG]][0] * %[[LHS]]) * (%[[RHS_SCALE_LONG]][0] * %[[RHS]]) + %[[ACC]]
 //  CHECK-SAME: vector<4xf8E8M0FNU>, vector<32xf4E2M1FN>, vector<4xf8E8M0FNU>, vector<32xf8E4M3FN>, vector<16xf32>
+
+// -----
+
+// Test lowering multi_pack scaled MFMA where scales are 4-element packed
+// vectors and __multi_pack_k_iter selects the correct byte.
+#contraction_accesses = [
+ affine_map<() -> ()>,
+ affine_map<() -> ()>,
+ affine_map<() -> ()>,
+ affine_map<() -> ()>,
+ affine_map<() -> ()>
+]
+func.func @lower_inner_tiled_multi_pack_scaled_mfma(
+      %lhs: vector<32xf4E2M1FN>, %rhs: vector<32xf8E4M3FN>,
+      %lhsScale: vector<4xf8E8M0FNU>, %rhsScale: vector<4xf8E8M0FNU>,
+      %acc: vector<4xf32>) -> vector<4xf32> {
+  %0 = iree_codegen.inner_tiled ins(%lhs, %rhs, %lhsScale, %rhsScale) outs(%acc) {
+    indexing_maps = #contraction_accesses,
+    iterator_types = [],
+    kind = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32,
+      lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32,
+      multi_pack = [1, 1, 4, 4, 1]>,
+    semantics = #iree_gpu.mma_semantics<distributed = true, opaque = false>,
+    __multi_pack_k_iter = 2 : i64
+  } : vector<32xf4E2M1FN>, vector<32xf8E4M3FN>, vector<4xf8E8M0FNU>, vector<4xf8E8M0FNU> into vector<4xf32>
+  return %0 : vector<4xf32>
+}
+
+module attributes { transform.with_named_sequence } {
+  transform.named_sequence @__transform_main(%root: !transform.any_op {transform.readonly}) {
+    %func = transform.structured.match ops{["func.func"]} in %root : (!transform.any_op) -> !transform.any_op
+    transform.apply_patterns to %func {
+      transform.apply_patterns.iree.lower_inner_tiled
+    } : !transform.any_op
+    transform.yield
+  }
+}
+
+// CHECK-LABEL: func @lower_inner_tiled_multi_pack_scaled_mfma
+//  CHECK-SAME:   %[[LHS:[A-Za-z0-9]+]]: vector<32xf4E2M1FN>
+//  CHECK-SAME:   %[[RHS:[A-Za-z0-9]+]]: vector<32xf8E4M3FN>
+//  CHECK-SAME:   %[[LHS_SCALE:[A-Za-z0-9]+]]: vector<4xf8E8M0FNU>
+//  CHECK-SAME:   %[[RHS_SCALE:[A-Za-z0-9]+]]: vector<4xf8E8M0FNU>
+//  CHECK-SAME:   %[[ACC:[A-Za-z0-9]+]]: vector<4xf32>
+//       CHECK:   %[[CST:.+]] = arith.constant dense<5.877470e-39> : vector<4xf8E8M0FNU>
+//       CHECK:   %[[LHS_BYTE:.+]] = vector.extract %[[LHS_SCALE]][2] : f8E8M0FNU from vector<4xf8E8M0FNU>
+//       CHECK:   %[[RHS_BYTE:.+]] = vector.extract %[[RHS_SCALE]][2] : f8E8M0FNU from vector<4xf8E8M0FNU>
+//       CHECK:   %[[LHS_PAD:.+]] = vector.insert %[[LHS_BYTE]], %[[CST]] [0] : f8E8M0FNU into vector<4xf8E8M0FNU>
+//       CHECK:   %[[RHS_PAD:.+]] = vector.insert %[[RHS_BYTE]], %[[CST]] [0] : f8E8M0FNU into vector<4xf8E8M0FNU>
+//       CHECK:   amdgpu.scaled_mfma 16x16x128 (%[[LHS_PAD]][0] * %[[LHS]]) * (%[[RHS_PAD]][0] * %[[RHS]]) + %[[ACC]]

@@ -331,12 +331,22 @@ LogicalResult InnerTiledOp::verify() {
 
   SmallVector<int64_t> bounds;
   getIterationBounds(bounds);
-  for (auto [type, map] : llvm::zip_equal(opTypes, indexingMaps)) {
-    // The truncation functionality of llvm::zip is intentional here to ignore
-    // the inner dimensions.
+  SmallVector<int64_t> multiPackFactors = getKind().getMultiPackFactors();
+  ArrayRef<Attribute> iterAttrs = getIteratorTypes().getValue();
+  for (auto [opIdx, type, map] :
+       llvm::enumerate(opTypes, indexingMaps)) {
+    int64_t mp = multiPackFactors[opIdx];
     for (auto [dim, size] : llvm::zip(map.getResults(), type.getShape())) {
       int64_t dimIdx = cast<AffineDimExpr>(dim).getPosition();
-      if (size != bounds[dimIdx]) {
+      int64_t expected = bounds[dimIdx];
+      // For multi-packed reduction dims, the outer size is reduced by the
+      // multi_pack factor.
+      if (mp > 1 && !ShapedType::isDynamic(expected) &&
+          cast<linalg::IteratorTypeAttr>(iterAttrs[dimIdx]).getValue() ==
+              utils::IteratorType::reduction) {
+        expected = expected / mp;
+      }
+      if (size != 1 && size != expected) {
         return emitOpError("shape does not match iteration bounds");
       }
     }
@@ -386,19 +396,63 @@ void InnerTiledOp::getIterationBounds(
     SmallVectorImpl<int64_t> &iterationBounds) {
   SmallVector<ShapedType> operandTypes = getOperandShapedTypes();
   SmallVector<AffineMap, 4> indexingMaps(getIndexingMapsArray());
-  AffineMap combinedMap = concatAffineMaps(indexingMaps, getContext());
-  SmallVector<int64_t> combinedOuterShapes;
-  for (auto [opType, map] : llvm::zip_equal(operandTypes, indexingMaps)) {
-    llvm::append_range(combinedOuterShapes,
-                       opType.getShape().take_front(map.getNumResults()));
+  SmallVector<int64_t> multiPackFactors = getKind().getMultiPackFactors();
+  ArrayRef<Attribute> iterAttrs = getIteratorTypes().getValue();
+  unsigned numIterators = iterAttrs.size();
+  iterationBounds.assign(numIterators, 0);
+  // Take the maximum extent across all operands for each iteration dimension.
+  // For multi-packed reduction dims, scale up the operand's outer size by the
+  // multi_pack factor to recover the true iteration count.
+  for (auto [opIdx, opType, map] :
+       llvm::enumerate(operandTypes, indexingMaps)) {
+    ArrayRef<int64_t> shape = opType.getShape();
+    int64_t mp = multiPackFactors[opIdx];
+    for (auto [dim, size] : llvm::zip(map.getResults(), shape)) {
+      int64_t dimIdx = cast<AffineDimExpr>(dim).getPosition();
+      int64_t &bound = iterationBounds[dimIdx];
+      if (ShapedType::isDynamic(bound))
+        continue;
+      int64_t effectiveSize = size;
+      if (mp > 1 && !ShapedType::isDynamic(size) &&
+          cast<linalg::IteratorTypeAttr>(iterAttrs[dimIdx]).getValue() ==
+              utils::IteratorType::reduction) {
+        effectiveSize = size * mp;
+      }
+      if (ShapedType::isDynamic(effectiveSize)) {
+        bound = effectiveSize;
+      } else if (effectiveSize > bound) {
+        bound = effectiveSize;
+      }
+    }
   }
-  AffineMap inverseMap = inversePermutation(combinedMap);
-  iterationBounds.append(inverseMap.compose(combinedOuterShapes));
 }
 
 std::optional<SmallVector<int64_t, 4>> InnerTiledOp::getShapeForUnroll() {
-  SmallVector<int64_t, 4> shape;
-  getIterationBounds(shape);
+  // Use bounds without multi_pack scale-up so we create one clone per "packed"
+  // tile (e.g. 104 in K) instead of per logical step (416). Otherwise we would
+  // create 4x too many clones and hang or OOM on large contracts.
+  SmallVector<ShapedType> operandTypes = getOperandShapedTypes();
+  SmallVector<AffineMap, 4> indexingMaps(getIndexingMapsArray());
+  ArrayRef<Attribute> iterAttrs = getIteratorTypes().getValue();
+  unsigned numIterators = iterAttrs.size();
+  SmallVector<int64_t, 4> shape(numIterators, 0);
+  for (auto [opIdx, opType, map] :
+       llvm::enumerate(operandTypes, indexingMaps)) {
+    ArrayRef<int64_t> opShape = opType.getShape();
+    for (auto [dim, size] : llvm::zip(map.getResults(), opShape)) {
+      int64_t dimIdx = cast<AffineDimExpr>(dim).getPosition();
+      int64_t &bound = shape[dimIdx];
+      if (ShapedType::isDynamic(bound))
+        continue;
+      int64_t effectiveSize = size;
+      // Do NOT scale up by multi_pack here; we want the packed tile count.
+      if (ShapedType::isDynamic(effectiveSize)) {
+        bound = effectiveSize;
+      } else if (effectiveSize > bound) {
+        bound = effectiveSize;
+      }
+    }
+  }
   return shape;
 }
 

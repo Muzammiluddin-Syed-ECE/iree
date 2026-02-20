@@ -155,6 +155,17 @@ module {
 //  CHECK-SAME:   mma_types = #iree_gpu.data_tiled_scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f8E4M3FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, intrinsics_m = 4, intrinsics_n = 2, subgroups_n = 4, intrinsics_k = 4, operands_interleaving_intrinsics_k = [2, 3]>
 
 module {
+  func.func @test_scaled_mma_with_multi_pack() attributes {
+      mma_types = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32,
+        lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32,
+        multi_pack = [1, 1, 4, 4, 1]>} {
+    return
+  }
+}
+// CHECK-LABEL: func @test_scaled_mma_with_multi_pack
+//  CHECK-SAME:   mma_types = #iree_gpu.scaled_mma_layout<intrinsic = MFMA_SCALE_F32_16x16x128_B32, lhs_elem_type = f4E2M1FN, rhs_elem_type = f8E4M3FN, acc_elem_type = f32, multi_pack = [1, 1, 4, 4, 1]>
+
+module {
   func.func @test_any_lowering_config() attributes {
       lowering_config = #iree_gpu.lowering_config<{workgroup = [16, 16], thread = [0, 4]}>} {
     return

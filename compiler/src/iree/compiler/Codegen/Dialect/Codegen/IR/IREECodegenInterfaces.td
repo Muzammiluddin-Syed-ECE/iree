@@ -266,6 +266,22 @@ def IREECodegen_InnerTileDescAttrInterface :
         return {};
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns per-operand multi-pack factors. A factor of 1 means no packing;
+        a factor of N means N consecutive intrinsic invocations' worth of data
+        for that operand are interleaved contiguously in the LDS layout.
+      }],
+      /*retType=*/"::llvm::SmallVector<int64_t>",
+      /*methodName=*/"getMultiPackFactors",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        int64_t numOps = $_attr.getExpectedNumInputs() +
+                         $_attr.getExpectedNumOutputs();
+        return ::llvm::SmallVector<int64_t>(numOps, 1);
+      }]
+    >,
   ];
 
   let extraSharedClassDeclaration = [{

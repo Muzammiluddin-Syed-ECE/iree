@@ -916,6 +916,16 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
 
   IREE::Codegen::InnerTileDescAttrInterface kind = schedule->mmaKind;
 
+  // For ScaledMMA intrinsics, enable multi_pack to pack consecutive
+  // K iterations' scales contiguously in LDS for efficient 32-bit loads.
+  if (auto smma = dyn_cast<GPU::ScaledMMAAttr>(kind)) {
+    MLIRContext *ctx = smma.getContext();
+    kind = GPU::ScaledMMAAttr::get(
+        ctx, smma.getIntrinsic(), smma.getLhsElemType(), smma.getRhsElemType(),
+        smma.getAccElemType(), smma.getColMajor(),
+        DenseI64ArrayAttr::get(ctx, {1, 1, 1, 1, 1}));
+  }
+
   // Attach the MMA schedule as an attribute to the entry point export function
   // for later access in the pipeline.
   MLIRContext *context = target.getContext();

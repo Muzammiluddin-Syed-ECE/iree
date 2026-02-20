@@ -1474,6 +1474,10 @@ int64_t ScaledMMAAttr::getExpectedNumInputs() const { return 4; }
 
 int64_t ScaledMMAAttr::getExpectedNumOutputs() const { return 1; }
 
+SmallVector<int64_t> ScaledMMAAttr::getMultiPackFactors() const {
+  return getMultiPackArray();
+}
+
 MMASingleSubgroupLayout getSingleSubgroupLayout(ScaledMMAIntrinsic intrinsic,
                                                 int64_t operandIndex) {
   const MMASingleSubgroupLayout mfmaAcc16x16 = {
@@ -1552,6 +1556,18 @@ MMASingleSubgroupLayout getSingleSubgroupLayout(ScaledMMAIntrinsic intrinsic,
   return baseLayout;
 }
 
+MMASingleSubgroupLayout getMultiPackedLayout(ScaledMMAIntrinsic intrinsic,
+                                             int64_t operandIndex,
+                                             int64_t multiPackFactor,
+                                             bool isAccColMajor = false) {
+  MMASingleSubgroupLayout layout =
+      getSingleSubgroupLayout(intrinsic, operandIndex, isAccColMajor);
+  if (multiPackFactor > 1) {
+    layout.element.back() *= multiPackFactor;
+  }
+  return layout;
+}
+
 int64_t ScaledMMAAttr::getSubgroupSize() const {
   return getIntrinsicSubgroupSize(getIntrinsic());
 }
@@ -1612,6 +1628,8 @@ SmallVector<VectorType, 4> ScaledMMAAttr::getUndistributedTileTypes() const {
          "expected block size to be set up correctly");
   int64_t n = rhsLayout.outer[2] * rhsLayout.thread[2] * rhsLayout.element[2];
 
+  SmallVector<int64_t> mp = getMultiPackArray();
+
   Type lhsType = getLhsElemType();
   Type rhsType = getRhsElemType();
   Type accType = getAccElemType();
@@ -1620,8 +1638,10 @@ SmallVector<VectorType, 4> ScaledMMAAttr::getUndistributedTileTypes() const {
   SmallVector<VectorType, 4> results;
   results.push_back(VectorType::get({m, kScale, blockSize}, lhsType));
   results.push_back(VectorType::get({kScale, blockSize, n}, rhsType));
-  results.push_back(VectorType::get({m, kScale}, scaleType));
-  results.push_back(VectorType::get({kScale, n}, scaleType));
+  int64_t kScaleLhs = kScale * mp[kScaledMMAOperandLhsScale];
+  int64_t kScaleRhs = kScale * mp[kScaledMMAOperandRhsScale];
+  results.push_back(VectorType::get({m, kScaleLhs}, scaleType));
+  results.push_back(VectorType::get({kScaleRhs, n}, scaleType));
   results.push_back(VectorType::get({m, n}, accType));
   return results;
 }
@@ -1632,12 +1652,15 @@ SmallVector<VectorType, 4> ScaledMMAAttr::getDistributedTileTypes() const {
   Type accType = getAccElemType();
   Type scaleType = Float8E8M0FNUType::get(getContext());
 
+  SmallVector<int64_t> mp = getMultiPackArray();
+
   SmallVector<VectorType, 4> results;
   std::array<Type, 5> argTypes = {lhsType, rhsType, scaleType, scaleType,
                                   accType};
   for (auto [opIndex, type] : llvm::enumerate(argTypes)) {
     MMASingleSubgroupLayout layout =
-        getSingleSubgroupLayout(getIntrinsic(), opIndex);
+        getMultiPackedLayout(getIntrinsic(), opIndex, mp[opIndex],
+                             getColMajor());
     int64_t outer = ShapedType::getNumElements(layout.outer);
     int64_t element = ShapedType::getNumElements(layout.element);
     results.push_back(VectorType::get({outer * element}, type));
@@ -1649,8 +1672,10 @@ std::optional<SmallVector<int64_t, 2>>
 ScaledMMAAttr::getUndistributedTileDimExpansion(int64_t operandIndex,
                                                 int64_t dim) const {
   assert(operandIndex <= kScaledMMAOperandAcc && "invalid operand index");
+  SmallVector<int64_t> mp = getMultiPackArray();
   MMASingleSubgroupLayout layout =
-      getSingleSubgroupLayout(getIntrinsic(), operandIndex, getColMajor());
+      getMultiPackedLayout(getIntrinsic(), operandIndex, mp[operandIndex],
+                           getColMajor());
   if (layout.outer[dim] > 1) {
     return SmallVector<int64_t, 2>{layout.outer[dim],
                                    layout.element[dim] * layout.thread[dim]};
@@ -1674,8 +1699,10 @@ LogicalResult ScaledMMAAttr::populateOperandOffsetsSizesStrides(
     SmallVectorImpl<OpFoldResult> &strides) const {
   assert(operandIndex <= kScaledMMAOperandAcc && "Scaled MFMA has 5 operands");
 
+  SmallVector<int64_t> mp = getMultiPackArray();
   MMASingleSubgroupLayout subgroupLayout =
-      getSingleSubgroupLayout(getIntrinsic(), operandIndex, getColMajor());
+      getMultiPackedLayout(getIntrinsic(), operandIndex, mp[operandIndex],
+                           getColMajor());
 
   SmallVector<OpFoldResult> canonicalOffsets;
   SmallVector<OpFoldResult> canonicalSizes;
@@ -1699,10 +1726,15 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
   if (outputs.size() != 1) {
     return failure();
   }
-  SmallVector<VectorType> threadTypes = getDistributedTileTypes();
-  if (!llvm::equal(threadTypes,
-                   llvm::concat<Type>(inputs.getTypes(), outputs.getTypes()))) {
-    return failure();
+  // When multi_pack is active, scale operands may have been narrowed to
+  // single-byte vectors by LowerInnerTiledPattern. Skip strict type check.
+  if (!hasMultiPack()) {
+    SmallVector<VectorType> threadTypes = getDistributedTileTypes();
+    if (!llvm::equal(threadTypes,
+                     llvm::concat<Type>(inputs.getTypes(),
+                                        outputs.getTypes()))) {
+      return failure();
+    }
   }
 
   SmallVector<VectorType> subgroupTypes = getUndistributedTileTypes();
@@ -1718,39 +1750,64 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
       SplatElementsAttr::get(
           VectorType::get({getScalesVectorSize()}, f8E8M0),
           llvm::APFloat::getSmallest(f8E8M0.getFloatSemantics())));
-  auto padScales = [&](Value scales) {
-    Value scale = vector::ExtractOp::create(builder, loc, scales, 0);
-    Value padded = vector::InsertOp::create(builder, loc, scale, zeroScales, 0);
+  auto padScalesByte = [&](Value scales, int64_t idx) {
+    Value scale = vector::ExtractOp::create(builder, loc, scales, idx);
+    Value padded =
+        vector::InsertOp::create(builder, loc, scale, zeroScales, 0);
     return padded;
   };
 
   Value lhs = inputs[kScaledMMAOperandLhs];
   Value rhs = inputs[kScaledMMAOperandRhs];
-  Value lhsScales = padScales(inputs[kScaledMMAOperandLhsScale]);
-  Value rhsScales = padScales(inputs[kScaledMMAOperandRhsScale]);
-  Value acc = outputs[0];
+  Value lhsScalesInput = inputs[kScaledMMAOperandLhsScale];
+  Value rhsScalesInput = inputs[kScaledMMAOperandRhsScale];
 
   ArrayRef<int64_t> lhsShape = subgroupTypes[kScaledMMAOperandLhs].getShape();
   ArrayRef<int64_t> rhsShape = subgroupTypes[kScaledMMAOperandRhs].getShape();
   int64_t m = lhsShape[0];
-  // We use m x [k / kPerBlock] x blockSize as the LHS pre-distribution shape
-  // since this makes the higher-level tiling clearer.
   int64_t k = lhsShape[1] * lhsShape[2];
   int64_t n = rhsShape[2];
 
-  // Since the LHS and RHS layouts are both {M,N}xK, we can get a column-major
-  // result just by swapping the LHS and RHS.
   if (getColMajor()) {
     std::swap(lhs, rhs);
-    std::swap(lhsScales, rhsScales);
+    std::swap(lhsScalesInput, rhsScalesInput);
     std::swap(n, m);
   }
 
-  Value result =
-      amdgpu::ScaledMFMAOp::create(builder, loc, m, n, k, lhs, rhs, acc,
-                                   lhsScales, rhsScales, /*scalesIdxA=*/0,
-                                   /*scalesIdxB=*/0);
-  results.push_back(result);
+  int64_t lhsScaleElts =
+      cast<VectorType>(lhsScalesInput.getType()).getNumElements();
+  int64_t numScaleSteps = std::max(int64_t(1), lhsScaleElts);
+  int64_t lhsPerLane =
+      cast<VectorType>(lhs.getType()).getNumElements();
+  int64_t rhsPerLane =
+      cast<VectorType>(rhs.getType()).getNumElements();
+  int64_t lhsSliceSize = lhsPerLane / numScaleSteps;
+  int64_t rhsSliceSize = rhsPerLane / numScaleSteps;
+
+  Value acc = outputs[0];
+  for (int64_t i = 0; i < numScaleSteps; ++i) {
+    Value lhsSlice = lhs;
+    Value rhsSlice = rhs;
+    if (numScaleSteps > 1) {
+      // Slice the data vector for this K step.
+      SmallVector<int64_t> lhsOffsets = {i * lhsSliceSize};
+      SmallVector<int64_t> lhsSizes = {lhsSliceSize};
+      SmallVector<int64_t> lhsStrides = {1};
+      lhsSlice = vector::ExtractStridedSliceOp::create(
+          builder, loc, lhs, lhsOffsets, lhsSizes, lhsStrides);
+      SmallVector<int64_t> rhsOffsets = {i * rhsSliceSize};
+      SmallVector<int64_t> rhsSizes = {rhsSliceSize};
+      SmallVector<int64_t> rhsStrides = {1};
+      rhsSlice = vector::ExtractStridedSliceOp::create(
+          builder, loc, rhs, rhsOffsets, rhsSizes, rhsStrides);
+    }
+    Value lhsScales = padScalesByte(lhsScalesInput, i);
+    Value rhsScales = padScalesByte(rhsScalesInput, i);
+    acc = amdgpu::ScaledMFMAOp::create(builder, loc, m, n, k, lhsSlice,
+                                       rhsSlice, acc, lhsScales, rhsScales,
+                                       /*scalesIdxA=*/0, /*scalesIdxB=*/0);
+  }
+  results.push_back(acc);
   return success();
 }
 

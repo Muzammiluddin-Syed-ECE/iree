@@ -595,6 +595,7 @@ def IREEGPU_ScaledMMAAttr :
     "getDistributionWorkerCount",
     "getOperandIteratorTypes",
     "buildUnderlyingOperations",
+    "getMultiPackFactors",
   ]>
 ]> {
   let mnemonic = "scaled_mma_layout";
@@ -620,7 +621,10 @@ def IREEGPU_ScaledMMAAttr :
     "::mlir::Type":$lhs_elem_type,
     "::mlir::Type":$rhs_elem_type,
     "::mlir::Type":$acc_elem_type,
-    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major
+    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major,
+    DefaultValuedParameter<"DenseI64ArrayAttr",
+      "DenseI64ArrayAttr::get($_ctxt, {1, 1, 1, 1, 1})",
+      "per-operand multi-pack factors">:$multi_pack
   );
 
   let extraClassDeclaration = [{
@@ -640,6 +644,17 @@ def IREEGPU_ScaledMMAAttr :
 
     // Return preferred subgroup size
     int64_t getSubgroupSize() const;
+
+    /// Returns the multi_pack factors as a SmallVector.
+    ::llvm::SmallVector<int64_t> getMultiPackArray() const {
+      return ::llvm::SmallVector<int64_t>(getMultiPack().asArrayRef());
+    }
+
+    /// Returns true if any operand has a multi_pack factor > 1.
+    bool hasMultiPack() const {
+      return ::llvm::any_of(getMultiPack().asArrayRef(),
+                            [](int64_t v) { return v > 1; });
+    }
 
     /// Returns the shape of the scaled MMA operation:
     /// ```

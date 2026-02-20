@@ -1256,15 +1256,49 @@ convertScaledContractionToInnerTiledMma(
     return failure();
   }
 
-  ValueRange inputs = linalgOp->getOperands();
+  SmallVector<Value> operands(linalgOp->getOperands());
 
   SmallVector<Type> eltTypes;
   smmaKind.getElementTypes(eltTypes);
   for (int i :
        {kScaledMMAOperandLhs, kScaledMMAOperandRhs, kScaledMMAOperandAcc}) {
-    if (cast<RankedTensorType>(inputs[i].getType()).getElementType() !=
+    if (cast<RankedTensorType>(operands[i].getType()).getElementType() !=
         eltTypes[i]) {
       return failure();
+    }
+  }
+
+  // For multi-packed scale operands, replace the standard PackOps with wider
+  // ones so that each lane's consecutive K-scale bytes are contiguous in LDS.
+  if (smmaKind.hasMultiPack()) {
+    Location loc = linalgOp.getLoc();
+    SmallVector<int64_t> multiPack = smmaKind.getMultiPackArray();
+    for (int scaleIdx :
+         {kScaledMMAOperandLhsScale, kScaledMMAOperandRhsScale}) {
+      int64_t mp = multiPack[scaleIdx];
+      if (mp <= 1)
+        continue;
+
+      auto packOp = operands[scaleIdx].getDefiningOp<linalg::PackOp>();
+      if (!packOp)
+        continue;
+
+      Value source = packOp.getSource();
+      SmallVector<OpFoldResult> innerTiles = packOp.getMixedTiles();
+      // Widen the K inner tile (last dim for scales) by multi_pack factor.
+      int64_t kTileIdx = innerTiles.size() - 1;
+      std::optional<int64_t> kBase = getConstantIntValue(innerTiles[kTileIdx]);
+      if (!kBase)
+        continue;
+      innerTiles[kTileIdx] = rewriter.getIndexAttr(*kBase * mp);
+
+      Value dest = linalg::PackOp::createDestinationTensor(
+          rewriter, loc, source, innerTiles, packOp.getInnerDimsPos(),
+          packOp.getOuterDimsPerm());
+      auto newPackOp = linalg::PackOp::create(
+          rewriter, loc, source, dest, packOp.getInnerDimsPos(), innerTiles,
+          packOp.getPaddingValue(), packOp.getOuterDimsPerm());
+      operands[scaleIdx] = newPackOp.getResult();
     }
   }
 
@@ -1306,8 +1340,9 @@ convertScaledContractionToInnerTiledMma(
   auto semantics = InnerTiledSemanticsAttr::get(context, /*distributed=*/false,
                                                 /*opaque=*/true);
   auto newMmaOp = rewriter.replaceOpWithNewOp<IREE::Codegen::InnerTiledOp>(
-      linalgOp, /*inputs=*/ValueRange{inputs}.drop_back(),
-      /*inits=*/ValueRange{inputs}.back(),
+      linalgOp,
+      /*inputs=*/ValueRange{operands}.drop_back(),
+      /*inits=*/operands.back(),
       ArrayRef<AffineMap>{outerLhsMap, outerRhsMap, outerSc1Map, outerSc2Map,
                           outerAccMap},
       iteratorTypes, smmaKind, semantics, perms);
@@ -1599,18 +1634,33 @@ struct DropInnerTiledUnitDimsPattern
       return rewriter.notifyMatchFailure(
           tiledOp, "unimplemented: unit dim dropping for tensor mma ops");
     }
-    SmallVector<int64_t> bounds;
-    tiledOp.getIterationBounds(bounds);
-    if (bounds.empty()) {
+    // Check that all operands have all-unit outer dimensions. We inspect raw
+    // shapes rather than getIterationBounds because the latter inflates
+    // reduction dims by multi_pack, which would prevent folding even though
+    // the actual outer tiles are already unit.
+    SmallVector<ShapedType> operandTypes = tiledOp.getOperandShapedTypes();
+    bool hasOuterDims = false;
+    bool allOuterUnit = true;
+    for (auto [opIndex, opType] : llvm::enumerate(operandTypes)) {
+      int64_t outerRank = tiledOp.getOperandOuterRank(opIndex);
+      if (outerRank == 0)
+        continue;
+      hasOuterDims = true;
+      for (int64_t i = 0; i < outerRank; ++i) {
+        if (opType.getShape()[i] != 1) {
+          allOuterUnit = false;
+          break;
+        }
+      }
+      if (!allOuterUnit)
+        break;
+    }
+    if (!hasOuterDims) {
       return rewriter.notifyMatchFailure(tiledOp, "no dimensions to fold");
     }
-
-    // TODO: Generalize to allow only some iteration bounds to be unit. This
-    // pattern currently only supports the most common case of unrolling to the
-    // intrinsic shape.
-    if (!llvm::all_of(bounds, [](int64_t b) { return b == 1; })) {
+    if (!allOuterUnit) {
       return rewriter.notifyMatchFailure(tiledOp,
-                                         "not all iteration bounds are unit");
+                                         "not all outer dims are unit");
     }
 
     Location loc = tiledOp.getLoc();
@@ -1762,15 +1812,59 @@ struct UnrollInnerTiledPattern
                                 ArrayRef<int64_t> operandOffets) {
         SmallVector<int64_t> operandShape = applyPermutationMap(
             permutationMap, ArrayRef<int64_t>(*targetShape));
+        // Clamp slice sizes to the actual operand dimension for broadcast dims.
+        auto actualShape = cast<ShapedType>(operand.getType()).getShape();
+        for (size_t i = 0; i < operandShape.size(); i++) {
+          operandShape[i] = std::min(operandShape[i], actualShape[i]);
+        }
         SmallVector<int64_t> operandStrides(operandOffets.size(), 1);
         slicesOperands[index] = vector::ExtractStridedSliceOp::create(
             rewriter, loc, operand, operandOffets, operandShape,
             operandStrides);
       };
       // Extract the new input operands.
+      SmallVector<int64_t> multiPackFactors =
+          tiledOp.getKind().getMultiPackFactors();
+      auto iterTypes = tiledOp.getIteratorTypes().getValue();
+      unsigned numDims = iterTypes.size();
+      SmallVector<int64_t> maxMultiPackPerDim(numDims, 1);
+      for (auto [inputIndex, map] : llvm::enumerate(
+               ArrayRef<AffineMap>(permutationMaps).drop_back())) {
+        int64_t mp = multiPackFactors[inputIndex];
+        if (mp <= 1)
+          continue;
+        for (AffineExpr result : map.getResults()) {
+          int64_t dimIdx = cast<AffineDimExpr>(result).getPosition();
+          if (cast<linalg::IteratorTypeAttr>(iterTypes[dimIdx]).getValue() ==
+              utils::IteratorType::reduction) {
+            maxMultiPackPerDim[dimIdx] =
+                std::max(maxMultiPackPerDim[dimIdx], mp);
+          }
+        }
+      }
       for (auto [inputIndex, input] : llvm::enumerate(tiledOp.getInputs())) {
         SmallVector<int64_t> inOffsets = applyPermutationMap(
             permutationMaps[inputIndex], ArrayRef<int64_t>(offsets));
+        auto inputShape = cast<ShapedType>(input.getType()).getShape();
+        int64_t mp = multiPackFactors[inputIndex];
+        AffineMap map = permutationMaps[inputIndex];
+        for (size_t i = 0; i < inOffsets.size(); i++) {
+          int64_t dimIdx =
+              cast<AffineDimExpr>(map.getResult(i)).getPosition();
+          if (inputShape[i] == 1) {
+            inOffsets[i] = 0;
+          } else if (mp > 1) {
+            if (cast<linalg::IteratorTypeAttr>(iterTypes[dimIdx]).getValue() ==
+                utils::IteratorType::reduction) {
+              inOffsets[i] = inOffsets[i] / mp;
+            }
+          } else if (maxMultiPackPerDim[dimIdx] > 1 &&
+                     cast<linalg::IteratorTypeAttr>(iterTypes[dimIdx])
+                             .getValue() ==
+                         utils::IteratorType::reduction) {
+            inOffsets[i] = inOffsets[i] * maxMultiPackPerDim[dimIdx];
+          }
+        }
         extractOperand(inputIndex, input, permutationMaps[inputIndex],
                        inOffsets);
       }
@@ -1878,6 +1972,36 @@ getInnerTiledUnitShape(Operation *op) {
     return std::nullopt;
   }
   SmallVector<int64_t> targetOuterShape(tiledOp.getIteratorTypes().size(), 1);
+  // With multi_pack, group K steps by multi_pack so one clone covers the full
+  // packed group. buildUnderlyingOperations handles slicing the data for each
+  // MFMA within the group and cycling scalesIdx.
+  if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(tiledOp.getKind())) {
+    if (smma.hasMultiPack()) {
+      SmallVector<int64_t> mp = smma.getMultiPackArray();
+      auto iterTypes = tiledOp.getIteratorTypes().getValue();
+      SmallVector<AffineMap> maps = tiledOp.getIndexingMapsArray();
+      std::optional<SmallVector<int64_t, 4>> unrollShape =
+          tiledOp.getShapeForUnroll();
+      for (unsigned dimIdx = 0; dimIdx < iterTypes.size(); dimIdx++) {
+        if (cast<linalg::IteratorTypeAttr>(iterTypes[dimIdx]).getValue() !=
+            utils::IteratorType::reduction)
+          continue;
+        int64_t maxMp = 1;
+        for (auto [opIdx, map] :
+             llvm::enumerate(ArrayRef<AffineMap>(maps).drop_back())) {
+          for (AffineExpr result : map.getResults()) {
+            if (cast<AffineDimExpr>(result).getPosition() == dimIdx) {
+              maxMp = std::max(maxMp, mp[opIdx]);
+              break;
+            }
+          }
+        }
+        if (unrollShape && (*unrollShape)[dimIdx] >= maxMp) {
+          targetOuterShape[dimIdx] = maxMp;
+        }
+      }
+    }
+  }
   return targetOuterShape;
 }
 
