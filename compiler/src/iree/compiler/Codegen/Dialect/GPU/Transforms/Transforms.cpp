@@ -1736,13 +1736,25 @@ struct DecomposeRepeatsPattern
     }
 
     // ---------------------------------------------------------------
-    // 1. Create a base kind (repeats removed).
+    // 1. Create a base kind with M/N repeats removed but K/KB
+    //    preserved.  K and KB reduction repeats are handled inside
+    //    buildUnderlyingOperations (which emits one ScaledMFMAOp per
+    //    K/KB repeat with the correct scalesIdx), so we must NOT
+    //    decompose them here.
     // ---------------------------------------------------------------
+    int64_t numRepeatDims = repeats.size(); // 4 for ScaledMMAAttr (M, N, K, KB)
+    SmallVector<int64_t> baseRepeats(numRepeatDims, 1);
+    baseRepeats[2] = repeats[2]; // preserve K
+    baseRepeats[3] = repeats[3]; // preserve KB
+    bool allBaseRepeatsOne =
+        llvm::all_of(baseRepeats, [](int64_t v) { return v == 1; });
     auto baseKind = IREE::GPU::ScaledMMAAttr::get(
         tiledOp.getContext(), smmaKind.getIntrinsic(),
         smmaKind.getLhsElemType(), smmaKind.getRhsElemType(),
         smmaKind.getAccElemType(), smmaKind.getColMajor(),
-        /*repeats=*/nullptr);
+        allBaseRepeatsOne
+            ? nullptr
+            : DenseI64ArrayAttr::get(tiledOp.getContext(), baseRepeats));
 
     SmallVector<VectorType> baseTiles;
     baseKind.getUndistributedTileTypes(baseTiles);
@@ -1750,7 +1762,6 @@ struct DecomposeRepeatsPattern
     int64_t numOperands = tiledOp.getNumOperands();
     int64_t numInputs = tiledOp.getNumInputs();
     int64_t accIndex = numOperands - 1;
-    int64_t numRepeatDims = repeats.size(); // 4 for ScaledMMAAttr (M, N, K, KB)
     std::optional<ArrayAttr> permsAttr = tiledOp.getPermutations();
 
     // ---------------------------------------------------------------
@@ -1893,9 +1904,15 @@ struct DecomposeRepeatsPattern
     };
 
     // Build the parallel and reduction index ranges.
+    // K (idx 2) and KB (idx 3) are skipped — their repeats are preserved
+    // on the baseKind and handled by buildUnderlyingOperations, which emits
+    // separate ScaledMFMAOps with the correct scalesIdx for scale packing.
     SmallVector<int64_t> parallelDims, reductionDims;
     for (int64_t r = 0; r < numRepeatDims; ++r) {
       if (repeats[r] <= 1) {
+        continue;
+      }
+      if (r == 2 || r == 3) {
         continue;
       }
       if (innerIterTypes[r] == utils::IteratorType::reduction) {
@@ -1903,6 +1920,11 @@ struct DecomposeRepeatsPattern
       } else {
         parallelDims.push_back(r);
       }
+    }
+
+    if (parallelDims.empty() && reductionDims.empty()) {
+      return rewriter.notifyMatchFailure(
+          tiledOp, "only K/KB repeats remain; handled by lowering");
     }
 
     // Flat Cartesian iteration: for each parallel position, chain through
