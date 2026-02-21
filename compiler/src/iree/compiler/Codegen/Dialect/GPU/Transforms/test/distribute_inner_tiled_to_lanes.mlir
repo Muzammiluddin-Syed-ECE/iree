@@ -1269,3 +1269,47 @@ func.func @fuse_producer_slice(%arg1 : tensor<4x2x16x16xbf16>, %arg2 : tensor<1x
 //       CHECK:     iree_codegen.inner_tiled
 //  CHECK-SAME:     outs(%[[FILL]])
 //       CHECK:     mapping = [#iree_gpu.lane_id<0>]
+
+// -----
+
+// Test that accumulator-chained inner_tiled ops are fused into a single forall.
+
+#chained_contraction_accesses = [
+ affine_map<() -> ()>,
+ affine_map<() -> ()>,
+ affine_map<() -> ()>
+]
+func.func @chained_inner_tiled_distribute(
+    %lhs0: tensor<16x4xf32>, %rhs0: tensor<4x16xf32>,
+    %lhs1: tensor<16x4xf32>, %rhs1: tensor<4x16xf32>,
+    %acc: tensor<16x16xf32>) -> tensor<16x16xf32> {
+  %0 = iree_codegen.inner_tiled ins(%lhs0, %rhs0) outs(%acc) {
+    indexing_maps = #chained_contraction_accesses,
+    iterator_types = [],
+    kind = #iree_gpu.mma_layout<MFMA_F32_16x16x4_F32>,
+    semantics = #iree_gpu.mma_semantics<distributed = false, opaque = true>
+  } : tensor<16x4xf32>, tensor<4x16xf32> into tensor<16x16xf32>
+  %1 = iree_codegen.inner_tiled ins(%lhs1, %rhs1) outs(%0) {
+    indexing_maps = #chained_contraction_accesses,
+    iterator_types = [],
+    kind = #iree_gpu.mma_layout<MFMA_F32_16x16x4_F32>,
+    semantics = #iree_gpu.mma_semantics<distributed = false, opaque = true>
+  } : tensor<16x4xf32>, tensor<4x16xf32> into tensor<16x16xf32>
+  return %1 : tensor<16x16xf32>
+}
+
+// CHECK-LABEL: func @chained_inner_tiled_distribute
+//  CHECK-SAME:   %[[LHS0:[A-Za-z0-9]+]]: tensor<16x4xf32>
+//  CHECK-SAME:   %[[RHS0:[A-Za-z0-9]+]]: tensor<4x16xf32>
+//  CHECK-SAME:   %[[LHS1:[A-Za-z0-9]+]]: tensor<16x4xf32>
+//  CHECK-SAME:   %[[RHS1:[A-Za-z0-9]+]]: tensor<4x16xf32>
+//       CHECK:   scf.forall (%[[LANEID:.+]]) in (64) shared_outs(%[[ACC:.+]] = {{.*}}) -> (tensor<16x16xf32>)
+//       CHECK:     %[[MMA0:.+]] = iree_codegen.inner_tiled
+//  CHECK-SAME:       kind = #iree_gpu.mma_layout<MFMA_F32_16x16x4_F32>
+//  CHECK-SAME:       : tensor<1x1xf32>, tensor<1x1xf32> into tensor<4x1xf32>
+//       CHECK:     %[[MMA1:.+]] = iree_codegen.inner_tiled {{.*}} outs(%[[MMA0]])
+//  CHECK-SAME:       kind = #iree_gpu.mma_layout<MFMA_F32_16x16x4_F32>
+//  CHECK-SAME:       : tensor<1x1xf32>, tensor<1x1xf32> into tensor<4x1xf32>
+//       CHECK:     tensor.parallel_insert_slice %[[MMA1]] into %[[ACC]]
+//       CHECK:   mapping = [#iree_gpu.lane_id<0>]
+//   CHECK-NOT:   scf.forall

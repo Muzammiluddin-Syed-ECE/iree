@@ -51,6 +51,7 @@ iree_cc_library(
     "CombineBarrierRegions.cpp"
     "DecomposeRepeats.cpp"
     "DistributeInnerTiledToLanes.cpp"
+    "FuseConsecutiveScaleLoads.cpp"
     "ExpandUndistributedInnerTiles.cpp"
     "LowerIREEGPUOps.cpp"
     "Passes.cpp"

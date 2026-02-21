@@ -263,8 +263,8 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
       return GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/4,
            /*bestMNTileCountPerSubgroup=*/16,
-           /*bestKTileCountPerSubgroup=*/2,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits /
+           /*bestKTileCountPerSubgroup=*/1,
+           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
                inBitWidth});
     }
     return GPUMMAHeuristicSeeds(
@@ -274,11 +274,14 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
          /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits / inBitWidth});
   case GemmSize::LargeGemm:
     if (scaled) {
+      // K element count halved because K-repeat decomposition materializes
+      // the accumulator in LDS, consuming ~65 KiB.  Halving the K-tile
+      // keeps the total under the 160 KiB LDS budget.
       return GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/4,
            /*bestMNTileCountPerSubgroup=*/16,
-           /*bestKTileCountPerSubgroup=*/2,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits /
+           /*bestKTileCountPerSubgroup=*/1,
+           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
                inBitWidth});
     }
     return GPUMMAHeuristicSeeds(

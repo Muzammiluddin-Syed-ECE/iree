@@ -1585,6 +1585,134 @@ distributeInnerTiledOp(RewriterBase &rewriter,
   return &*newForallOp;
 }
 
+FailureOr<Operation *>
+distributeInnerTiledChain(RewriterBase &rewriter,
+                          ArrayRef<IREE::Codegen::InnerTiledOp> chain) {
+  assert(chain.size() >= 2 && "chain must have at least 2 ops");
+
+  auto firstOp = chain.front();
+  auto lastOp = chain.back();
+
+  for (auto tiledOp : chain) {
+    auto sem =
+        dyn_cast<IREE::GPU::InnerTiledSemanticsAttr>(tiledOp.getSemantics());
+    if (!sem || sem.getDistributed() || !tiledOp.hasTensorSemantics())
+      return rewriter.notifyMatchFailure(
+          tiledOp, "invalid semantics for chain distribution");
+    if (tiledOp.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(tiledOp, "expected single result");
+  }
+
+  RewriterBase::InsertionGuard g(rewriter);
+  Location loc = firstOp.getLoc();
+  MLIRContext *context = rewriter.getContext();
+  OpFoldResult zero = rewriter.getIndexAttr(0);
+  OpFoldResult one = rewriter.getIndexAttr(1);
+
+  Attribute mappingType = firstOp.getKind().getDistributionMappingKind();
+  if (!mappingType)
+    return rewriter.notifyMatchFailure(firstOp, "no distribution mapping");
+  OpFoldResult ub =
+      firstOp.getKind().getDistributionWorkerCount(rewriter, loc, firstOp);
+  if (!ub)
+    return firstOp.emitOpError("failed to get worker count");
+
+  rewriter.setInsertionPoint(firstOp);
+  auto newForallOp = scf::ForallOp::create(
+      rewriter, loc, ArrayRef<OpFoldResult>{zero}, ArrayRef<OpFoldResult>{ub},
+      ArrayRef<OpFoldResult>{one}, firstOp.getOutputs(),
+      ArrayAttr::get(context, {mappingType}));
+
+  rewriter.setInsertionPointToStart(newForallOp.getBody());
+  Value id = newForallOp.getInductionVar(0);
+
+  // Helper: compute per-lane extract_slice for a given operand.
+  auto sliceOperand = [&](IREE::Codegen::InnerTiledOp tiledOp,
+                          int64_t opIndex,
+                          Value source) -> FailureOr<Value> {
+    int64_t outerRank = tiledOp.getOperandOuterRank(opIndex);
+    SmallVector<OpFoldResult> offsets(outerRank, zero);
+    SmallVector<OpFoldResult> sizes;
+    for (int64_t i = 0; i < outerRank; ++i) {
+      sizes.push_back(tensor::getMixedSize(rewriter, loc, source, i));
+    }
+    ArrayRef<int64_t> innerShape = tiledOp.getOperandInnerShape(opIndex);
+    SmallVector<int64_t> permutation;
+    std::optional<ArrayAttr> maybePerms = tiledOp.getPermutations();
+    if (maybePerms) {
+      permutation = llvm::to_vector(
+          cast<DenseI64ArrayAttr>((*maybePerms)[opIndex]).asArrayRef());
+    } else {
+      permutation = llvm::to_vector(llvm::seq(
+          static_cast<int64_t>(0), static_cast<int64_t>(innerShape.size())));
+    }
+    SmallVector<OpFoldResult> strides(outerRank, one);
+    if (failed(tiledOp.getKind().populateOperandOffsetsSizesStrides(
+            rewriter, loc, opIndex, id, permutation, offsets, sizes, strides)))
+      return failure();
+    return (Value)tensor::ExtractSliceOp::create(rewriter, loc, source, offsets,
+                                                 sizes, strides);
+  };
+
+  tensor::ExtractSliceOp firstAccExtractOp;
+  Value currentAcc;
+
+  for (size_t chainIdx = 0; chainIdx < chain.size(); ++chainIdx) {
+    IREE::Codegen::InnerTiledOp tiledOp = chain[chainIdx];
+    int64_t numInputs = tiledOp.getNumInputs();
+
+    SmallVector<Value> inputSlices;
+    for (int64_t inIdx = 0; inIdx < numInputs; ++inIdx) {
+      FailureOr<Value> slice =
+          sliceOperand(tiledOp, inIdx, tiledOp.getInputs()[inIdx]);
+      if (failed(slice))
+        return tiledOp->emitOpError("failed to slice input " + Twine(inIdx));
+      inputSlices.push_back(*slice);
+    }
+
+    SmallVector<Value> initSlices;
+    if (chainIdx == 0) {
+      int64_t accOpIndex = numInputs;
+      Value regionArg = newForallOp.getRegionIterArgs()[0];
+      FailureOr<Value> accSlice =
+          sliceOperand(tiledOp, accOpIndex, regionArg);
+      if (failed(accSlice))
+        return tiledOp->emitOpError("failed to slice accumulator");
+      firstAccExtractOp =
+          cast<tensor::ExtractSliceOp>(accSlice->getDefiningOp());
+      initSlices.push_back(*accSlice);
+    } else {
+      initSlices.push_back(currentAcc);
+    }
+
+    auto opSemantics =
+        cast<IREE::GPU::InnerTiledSemanticsAttr>(tiledOp.getSemantics());
+    auto distributedSemantics = IREE::GPU::InnerTiledSemanticsAttr::get(
+        context, /*distributed=*/true, opSemantics.getOpaque());
+
+    auto newTiledOp = IREE::Codegen::InnerTiledOp::create(
+        rewriter, loc, inputSlices, initSlices, tiledOp.getIndexingMaps(),
+        tiledOp.getIteratorTypes(), tiledOp.getKind(), distributedSemantics);
+    newTiledOp->setDiscardableAttrs(tiledOp->getDiscardableAttrDictionary());
+
+    currentAcc = newTiledOp.getResult(0);
+  }
+
+  scf::InParallelOp terminator = newForallOp.getTerminator();
+  rewriter.setInsertionPointToStart(terminator.getBody());
+  tensor::ParallelInsertSliceOp::create(
+      rewriter, loc, currentAcc, firstAccExtractOp.getSource(),
+      firstAccExtractOp.getMixedOffsets(), firstAccExtractOp.getMixedSizes(),
+      firstAccExtractOp.getMixedStrides());
+
+  rewriter.replaceOp(lastOp, newForallOp);
+  for (int64_t i = chain.size() - 2; i >= 0; --i) {
+    rewriter.eraseOp(chain[i]);
+  }
+
+  return &*newForallOp;
+}
+
 //===----------------------------------------------------------------------===//
 // InnerTiledOp Unit Dim Folding
 //===----------------------------------------------------------------------===//
@@ -1736,18 +1864,13 @@ struct DecomposeRepeatsPattern
     }
 
     // ---------------------------------------------------------------
-    // 1. Create a base kind with M/N repeats removed but K/KB
-    //    preserved.  K and KB reduction repeats are handled inside
-    //    buildUnderlyingOperations (which emits one ScaledMFMAOp per
-    //    K/KB repeat with the correct scalesIdx), so we must NOT
-    //    decompose them here.
+    // 1. Create a base kind with all repeats removed.  K/KB repeats
+    //    are decomposed here (reduction chaining) and scale packing
+    //    is restored later by FuseConsecutiveScaleLoads.
     // ---------------------------------------------------------------
     int64_t numRepeatDims = repeats.size(); // 4 for ScaledMMAAttr (M, N, K, KB)
     SmallVector<int64_t> baseRepeats(numRepeatDims, 1);
-    baseRepeats[2] = repeats[2]; // preserve K
-    baseRepeats[3] = repeats[3]; // preserve KB
-    bool allBaseRepeatsOne =
-        llvm::all_of(baseRepeats, [](int64_t v) { return v == 1; });
+    bool allBaseRepeatsOne = true;
     auto baseKind = IREE::GPU::ScaledMMAAttr::get(
         tiledOp.getContext(), smmaKind.getIntrinsic(),
         smmaKind.getLhsElemType(), smmaKind.getRhsElemType(),
@@ -1904,15 +2027,9 @@ struct DecomposeRepeatsPattern
     };
 
     // Build the parallel and reduction index ranges.
-    // K (idx 2) and KB (idx 3) are skipped — their repeats are preserved
-    // on the baseKind and handled by buildUnderlyingOperations, which emits
-    // separate ScaledMFMAOps with the correct scalesIdx for scale packing.
     SmallVector<int64_t> parallelDims, reductionDims;
     for (int64_t r = 0; r < numRepeatDims; ++r) {
       if (repeats[r] <= 1) {
-        continue;
-      }
-      if (r == 2 || r == 3) {
         continue;
       }
       if (innerIterTypes[r] == utils::IteratorType::reduction) {
@@ -1920,11 +2037,6 @@ struct DecomposeRepeatsPattern
       } else {
         parallelDims.push_back(r);
       }
-    }
-
-    if (parallelDims.empty() && reductionDims.empty()) {
-      return rewriter.notifyMatchFailure(
-          tiledOp, "only K/KB repeats remain; handled by lowering");
     }
 
     // Flat Cartesian iteration: for each parallel position, chain through

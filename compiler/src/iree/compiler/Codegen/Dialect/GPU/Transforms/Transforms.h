@@ -180,12 +180,20 @@ FailureOr<Operation *>
 distributeInnerTiledOp(RewriterBase &rewriter,
                        IREE::Codegen::InnerTiledOp tiledOp);
 
+// Distribute an accumulator-chained sequence of inner_tiled ops into a single
+// lane-level scf.forall, avoiding intermediate shared_outs that would be
+// promoted to LDS.
+FailureOr<Operation *>
+distributeInnerTiledChain(RewriterBase &rewriter,
+                          ArrayRef<IREE::Codegen::InnerTiledOp> chain);
+
 // Helper to map all scf.forall ops on lanes.
 void mapLaneForalls(RewriterBase &rewriter, Operation *funcOp,
                     bool insertBarrier);
 
 // Various populate pattern methods.
 void populateDecomposeRepeatsPatterns(RewritePatternSet &patterns);
+void populateFuseConsecutiveScaleLoadsPatterns(RewritePatternSet &patterns);
 void populateIREEGPUDropUnitDimsPatterns(RewritePatternSet &patterns);
 void populateIREEGPULowerInnerTiledPatterns(RewritePatternSet &patterns);
 void populateIREEGPULowerBarrierRegionPatterns(RewritePatternSet &patterns);

@@ -35,6 +35,25 @@ def DecomposeRepeatsPass :
   ];
 }
 
+def FuseConsecutiveScaleLoadsPass :
+    InterfacePass<"iree-gpu-fuse-consecutive-scale-loads", "mlir::FunctionOpInterface"> {
+  let summary = "Fuses consecutive single-byte scale loads into packed 4-byte loads";
+  let description = [{
+    After K-repeat decomposition and lowering to `amdgpu.scaled_mfma` ops,
+    each op has its own single-byte scale operand (padded to `vector<4xf8>`
+    with only byte 0 valid).  This pass finds accumulator chains of 2-4
+    `scaled_mfma` ops, packs their individual scale bytes into a single
+    shared `vector<4xf8E8M0FNU>`, and sets each op's `scalesIdx` to select
+    the correct byte.  This restores the `ds_read_b32` scale packing that
+    was lost during K-repeat decomposition.
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::vector::VectorDialect",
+    "::mlir::amdgpu::AMDGPUDialect",
+  ];
+}
+
 def DistributeInnerTiledToLanesPass :
     InterfacePass<"iree-gpu-distribute-inner-tiled-to-lanes", "mlir::FunctionOpInterface"> {
   let summary = "Distributes iree_codegen.inner_tiled ops to lanes";

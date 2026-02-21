@@ -88,8 +88,6 @@ void DistributeInnerTiledToLanesPass::runOnOperation() {
   MLIRContext *context = &getContext();
   mlir::FunctionOpInterface funcOp = getOperation();
 
-  // Distribute inner_tiled ops to lanes where possible and greedily fuse
-  // producers.
   SmallVector<IREE::Codegen::InnerTiledOp> tiledOps;
   funcOp.walk([&](IREE::Codegen::InnerTiledOp tiledOp) {
     if (!tiledOp.hasTensorSemantics()) {
@@ -101,18 +99,65 @@ void DistributeInnerTiledToLanesPass::runOnOperation() {
     return;
   }
 
-  IRRewriter rewriter(funcOp);
+  // Group inner_tiled ops into accumulator chains. A chain is a maximal
+  // sequence where op[i].getResult(0) feeds into op[i+1].getOutputs()[0]
+  // and the intermediate result has exactly one use.
+  SmallVector<SmallVector<IREE::Codegen::InnerTiledOp>> chains;
+  DenseSet<Operation *> visited;
+
   for (auto tiledOp : tiledOps) {
-    rewriter.setInsertionPoint(tiledOp);
-    FailureOr<scf::ForallOp> maybeLaneForall =
-        distributeInnerTiledOp(rewriter, tiledOp);
-    if (failed(maybeLaneForall)) {
+    if (visited.contains(tiledOp.getOperation()))
+      continue;
+
+    auto root = tiledOp;
+    while (true) {
+      auto prevOp = root.getOutputs()[0]
+                        .getDefiningOp<IREE::Codegen::InnerTiledOp>();
+      if (!prevOp || visited.contains(prevOp.getOperation()) ||
+          !prevOp.getResult(0).hasOneUse())
+        break;
+      root = prevOp;
+    }
+
+    SmallVector<IREE::Codegen::InnerTiledOp> chain;
+    auto current = root;
+    while (current) {
+      chain.push_back(current);
+      visited.insert(current.getOperation());
+
+      IREE::Codegen::InnerTiledOp next;
+      if (current.getResult(0).hasOneUse()) {
+        Operation *user = *current.getResult(0).getUsers().begin();
+        if (auto nextOp = dyn_cast<IREE::Codegen::InnerTiledOp>(user)) {
+          if (nextOp.getOutputs()[0] == current.getResult(0) &&
+              !visited.contains(nextOp.getOperation()))
+            next = nextOp;
+        }
+      }
+      current = next;
+    }
+    chains.push_back(std::move(chain));
+  }
+
+  IRRewriter rewriter(funcOp);
+  for (auto &chain : chains) {
+    FailureOr<Operation *> maybeForall;
+
+    if (chain.size() == 1) {
+      rewriter.setInsertionPoint(chain[0]);
+      maybeForall = distributeInnerTiledOp(rewriter, chain[0]);
+    } else {
+      maybeForall = distributeInnerTiledChain(rewriter, chain);
+    }
+
+    if (failed(maybeForall)) {
       funcOp.emitError() << "failed to distribute inner_tiled ops to lanes";
       return signalPassFailure();
     }
 
-    rewriter.setInsertionPointToStart(maybeLaneForall->getBody());
-    if (failed(fuseProducersGreedily(rewriter, *maybeLaneForall))) {
+    auto laneForall = cast<scf::ForallOp>(*maybeForall);
+    rewriter.setInsertionPointToStart(laneForall.getBody());
+    if (failed(fuseProducersGreedily(rewriter, laneForall))) {
       funcOp.emitError() << "failed to fuse producers into lane forall";
       return signalPassFailure();
     }
@@ -121,8 +166,6 @@ void DistributeInnerTiledToLanesPass::runOnOperation() {
   // Post distribution cleanup patterns.
   {
     RewritePatternSet patterns(context);
-    // Merge consecutive insert/extract slice ops to simplify later loop
-    // hoisting patterns.
     tensor::populateFoldTensorEmptyPatterns(patterns);
     tensor::populateMergeConsecutiveInsertExtractSlicePatterns(patterns);
     tensor::InsertSliceOp::getCanonicalizationPatterns(patterns, context);
