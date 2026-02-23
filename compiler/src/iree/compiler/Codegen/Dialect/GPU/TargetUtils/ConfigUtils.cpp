@@ -252,6 +252,14 @@ static GemmCutoff computeGemmCutoffsForAI(IREE::GPU::TargetAttr target,
 
 static std::optional<GPUMMAHeuristicSeeds>
 getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
+  // if (scaled) {
+  //   return GPUMMAHeuristicSeeds(
+  //     {/*bestSubgroupCountPerWorkgroup=*/8,
+  //      /*bestMNTileCountPerSubgroup=*/32,
+  //      /*bestKTileCountPerSubgroup=*/4,
+  //      /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
+  //          inBitWidth});
+  // }
   switch (gemmSize) {
   case GemmSize::SmallGemm:
     return GPUMMAHeuristicSeeds(
