@@ -263,7 +263,7 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
       return GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/4,
            /*bestMNTileCountPerSubgroup=*/16,
-           /*bestKTileCountPerSubgroup=*/1,
+           /*bestKTileCountPerSubgroup=*/2,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
                inBitWidth});
     }
@@ -274,13 +274,10 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
          /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits / inBitWidth});
   case GemmSize::LargeGemm:
     if (scaled) {
-      // K element count halved because K-repeat decomposition materializes
-      // the accumulator in LDS, consuming ~65 KiB.  Halving the K-tile
-      // keeps the total under the 160 KiB LDS budget.
       return GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/4,
            /*bestMNTileCountPerSubgroup=*/16,
-           /*bestKTileCountPerSubgroup=*/1,
+           /*bestKTileCountPerSubgroup=*/2,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
                inBitWidth});
     }
@@ -979,8 +976,13 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       promotionArray = {};
     } else {
-      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, defaultConfigAttr,
-                        defaultConfigAttr};
+      auto scaleSwizzleAttr = IREE::Codegen::XORShuffleAttr::get(
+          context, /*rowElems=*/int64_t(64), /*accessElems=*/int64_t(4),
+          /*row_stride=*/int64_t(0), /*per_phase=*/int64_t(0));
+      auto scaleConfigAttr = IREE::GPU::SwizzleOperandAttr::get(
+          context, defaultConfigAttr, scaleSwizzleAttr);
+      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, scaleConfigAttr,
+                        scaleConfigAttr};
     }
   }
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {
