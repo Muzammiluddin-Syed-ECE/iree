@@ -153,6 +153,100 @@ hal.executable public @main {
 
 // -----
 
+// Dual-axis interleaving: intrinsics_m=4, intrinsics_n=4, intrinsics_k=1
+// with M-interleaving for LHS scales and N-interleaving for RHS scales.
+// Each lane reads 4 contiguous scale bytes from the interleaved M or N
+// dimension, enabling packed 32-bit scale loads.
+
+#pipeline_layout_dual_axis = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
+  #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
+  #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
+  #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
+  #hal.pipeline.binding<storage_buffer, Indirect>],
+  flags = Indirect
+>
+#translation_info_dual_axis = #iree_codegen.translation_info<pipeline =
+  LLVMGPUTileAndFuse
+  workgroup_size = [256, 1, 1]
+  subgroup_size = 64,
+  {
+    gpu_pipeline_options = #iree_gpu.pipeline_options<
+      prefetch_num_stages = 0,
+      no_reduce_shared_memory_bank_conflicts = true>
+  }
+>
+#config_dual_axis = #iree_gpu.lowering_config<{
+  workgroup = [1, 1, 0, 0],
+  reduction = [0, 0, 1, 1],
+  promote_operands = [0, 1]
+}>
+hal.executable public @main_dual_axis {
+  hal.executable.variant public @rocm_hsaco_fb target(<"rocm", "rocm-hsaco-fb">) {
+    hal.executable.export public @data_tiled_scaled_mma_dual_axis_interleaving ordinal(0) layout(#pipeline_layout_dual_axis) count(%arg0: !hal.device) -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_slice()
+      hal.return %x, %y, %z : index, index, index
+    }
+    builtin.module {
+      func.func @data_tiled_scaled_mma_dual_axis_interleaving()
+        attributes {translation_info = #translation_info_dual_axis} {
+        %c0 = arith.constant 0 : index
+        %0 = hal.interface.binding.subspan layout(#pipeline_layout_dual_axis) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x1x2x4x4x16x32xf4E2M1FN>>
+        %1 = hal.interface.binding.subspan layout(#pipeline_layout_dual_axis) binding(1) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x1x2x4x4x16x32xf4E2M1FN>>
+        %2 = hal.interface.binding.subspan layout(#pipeline_layout_dual_axis) binding(2) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x2x4x16x4xf8E8M0FNU>>
+        %3 = hal.interface.binding.subspan layout(#pipeline_layout_dual_axis) binding(3) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x2x4x16x4xf8E8M0FNU>>
+        %4 = hal.interface.binding.subspan layout(#pipeline_layout_dual_axis) binding(4) alignment(64) offset(%c0) flags(Indirect) : !iree_tensor_ext.dispatch.tensor<readwrite:tensor<3x3x2x2x4x4x4x16x4xf32>>
+        %5 = iree_tensor_ext.dispatch.tensor.load %0, offsets = [0, 0, 0, 0, 0, 0, 0, 0], sizes = [3, 3, 1, 2, 4, 4, 16, 32], strides = [1, 1, 1, 1, 1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x1x2x4x4x16x32xf4E2M1FN>> -> tensor<3x3x1x2x4x4x16x32xf4E2M1FN>
+        %6 = iree_tensor_ext.dispatch.tensor.load %1, offsets = [0, 0, 0, 0, 0, 0, 0, 0], sizes = [3, 3, 1, 2, 4, 4, 16, 32], strides = [1, 1, 1, 1, 1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x1x2x4x4x16x32xf4E2M1FN>> -> tensor<3x3x1x2x4x4x16x32xf4E2M1FN>
+        %7 = iree_tensor_ext.dispatch.tensor.load %2, offsets = [0, 0, 0, 0, 0, 0], sizes = [3, 3, 2, 4, 16, 4], strides = [1, 1, 1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x2x4x16x4xf8E8M0FNU>> -> tensor<3x3x2x4x16x4xf8E8M0FNU>
+        %8 = iree_tensor_ext.dispatch.tensor.load %3, offsets = [0, 0, 0, 0, 0, 0], sizes = [3, 3, 2, 4, 16, 4], strides = [1, 1, 1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<3x3x2x4x16x4xf8E8M0FNU>> -> tensor<3x3x2x4x16x4xf8E8M0FNU>
+        %9 = iree_tensor_ext.dispatch.tensor.load %4, offsets = [0, 0, 0, 0, 0, 0, 0, 0, 0], sizes = [3, 3, 2, 2, 4, 4, 4, 16, 4], strides = [1, 1, 1, 1, 1, 1, 1, 1, 1] : !iree_tensor_ext.dispatch.tensor<readwrite:tensor<3x3x2x2x4x4x4x16x4xf32>> -> tensor<3x3x2x2x4x4x4x16x4xf32>
+        %10 = iree_codegen.inner_tiled ins(%5, %6, %7, %8) outs(%9) {
+          lowering_config = #config_dual_axis,
+          indexing_maps = [
+            affine_map<(m, n, k, kb) -> (m, k, kb)>,
+            affine_map<(m, n, k, kb) -> (n, k, kb)>,
+            affine_map<(m, n, k, kb) -> (m, k)>,
+            affine_map<(m, n, k, kb) -> (n, k)>,
+            affine_map<(m, n, k, kb) -> (m, n)>],
+          iterator_types = [
+            #linalg.iterator_type<parallel>,
+            #linalg.iterator_type<parallel>,
+            #linalg.iterator_type<reduction>,
+            #linalg.iterator_type<reduction>],
+          kind = #iree_gpu.data_tiled_scaled_mma_layout<
+            intrinsic = MFMA_SCALE_F32_16x16x128_B32,
+            lhs_elem_type = f4E2M1FN, rhs_elem_type = f4E2M1FN, acc_elem_type = f32,
+            intrinsics_m = 4, subgroups_m = 2, intrinsics_n = 4, subgroups_n = 2,
+            operands_interleaving_intrinsics_m = [2],
+            operands_interleaving_intrinsics_n = [3],
+            operands_interleaving_intrinsics_k = [2, 3]>,
+          semantics = #iree_gpu.mma_semantics<distributed = false, opaque = false>}
+          : tensor<3x3x1x2x4x4x16x32xf4E2M1FN>, tensor<3x3x1x2x4x4x16x32xf4E2M1FN>, tensor<3x3x2x4x16x4xf8E8M0FNU>, tensor<3x3x2x4x16x4xf8E8M0FNU> into tensor<3x3x2x2x4x4x4x16x4xf32>
+        iree_tensor_ext.dispatch.tensor.store %10, %4, offsets = [0, 0, 0, 0, 0, 0, 0, 0, 0], sizes = [3, 3, 2, 2, 4, 4, 4, 16, 4], strides = [1, 1, 1, 1, 1, 1, 1, 1, 1] : tensor<3x3x2x2x4x4x4x16x4xf32> -> !iree_tensor_ext.dispatch.tensor<readwrite:tensor<3x3x2x2x4x4x4x16x4xf32>>
+        return
+      }
+    }
+  }
+}
+
+// CHECK-LABEL: func.func @data_tiled_scaled_mma_dual_axis_interleaving()
+// Verify scale loads produce vector<4xf8E8M0FNU> (4 contiguous bytes per lane)
+// CHECK-DAG:  %[[A_SCALE_VEC:.+]] = vector.transfer_read {{.*}} vector<4x1x1x4xf8E8M0FNU>
+// CHECK-DAG:  %[[B_SCALE_VEC:.+]] = vector.transfer_read {{.*}} vector<4x1x1x4xf8E8M0FNU>
+// Verify 4-byte scale vectors are extracted for scalesIdx packing
+// CHECK-DAG:  vector.extract_strided_slice {{.*}} {offsets = [0], sizes = [4], strides = [1]} : vector<16xf8E8M0FNU> to vector<4xf8E8M0FNU>
+// CHECK-DAG:  vector.extract_strided_slice {{.*}} {offsets = [4], sizes = [4], strides = [1]} : vector<16xf8E8M0FNU> to vector<4xf8E8M0FNU>
+// CHECK-DAG:  vector.extract_strided_slice {{.*}} {offsets = [8], sizes = [4], strides = [1]} : vector<16xf8E8M0FNU> to vector<4xf8E8M0FNU>
+// CHECK-DAG:  vector.extract_strided_slice {{.*}} {offsets = [12], sizes = [4], strides = [1]} : vector<16xf8E8M0FNU> to vector<4xf8E8M0FNU>
+// Verify scaled_mfma uses scalesIdx 0-3 for scale byte selection
+// CHECK-DAG:  amdgpu.scaled_mfma 16x16x128 ({{.*}}[0] * {{.*}}) * ({{.*}}[0] * {{.*}})
+// CHECK-DAG:  amdgpu.scaled_mfma 16x16x128 ({{.*}}[1] * {{.*}}) * ({{.*}}[1] * {{.*}})
+// CHECK-DAG:  amdgpu.scaled_mfma 16x16x128 ({{.*}}[2] * {{.*}}) * ({{.*}}[2] * {{.*}})
+// CHECK-DAG:  amdgpu.scaled_mfma 16x16x128 ({{.*}}[3] * {{.*}}) * ({{.*}}[3] * {{.*}})
+
+// -----
+
 #pipeline_layout_f16_transb = #hal.pipeline.layout<bindings = [
   #hal.pipeline.binding<storage_buffer>,
   #hal.pipeline.binding<storage_buffer>,

@@ -201,13 +201,19 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // For scaled intrinsics, there is another reason to unroll K. Scales are held
   // in a vector of multiple scales, but only a single scale is used for each
   // instruction. We want to be able to load a contiguous vector of scales into
-  // registers, and use the same vector for consecutive instructions. Choose the
-  // LCM of the scales vector size unrolling factor, and the load bitwidth
-  // unrolling factor, so both are satisfied.
-  // * Note that typically, the load bitwidth unrolling factor will be 1, so the
-  // total K unrolling factor will just be the scales vector size.
+  // registers, and use the same vector for consecutive instructions.
+  //
+  // Scale packing can be achieved by K-dimension unrolling alone (requiring
+  // intrinsicsK >= scalesVectorSize), or by combining K-dimension unrolling
+  // with M/N-dimension unrolling (dual-axis interleaving), where the product
+  // of interleaved dimensions meets the scalesVectorSize requirement.
+  //
+  // We defer the final intrinsicsK decision until after intrinsicsM/N are
+  // determined, so we can choose dual-axis interleaving when it enables a
+  // better schedule.
+  int64_t scalesVectorSize = 0;
   if (auto scaledMmaAttr = dyn_cast<ScaledMMAAttr>(intrinsicAttr)) {
-    intrinsicsK = std::lcm(intrinsicsK, scaledMmaAttr.getScalesVectorSize());
+    scalesVectorSize = scaledMmaAttr.getScalesVectorSize();
   }
 
   // The total amount of unrolling along the M and N dimensions is normally
@@ -342,6 +348,42 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // in some microkernels that would provide their own DataTiledMMAAttr.
   int subgroupsK = 1;
 
+  // For scaled matmuls, determine the final intrinsicsK and interleaving
+  // strategy now that intrinsicsM and intrinsicsN are known. Scale packing
+  // requires scalesVectorSize contiguous bytes per lane. This can come from:
+  //   (a) K-only interleaving: intrinsicsK >= scalesVectorSize
+  //   (b) Dual-axis interleaving: intrinsicsK * intrinsicsM >= svs (LHS) and
+  //       intrinsicsK * intrinsicsN >= svs (RHS)
+  // Option (b) spreads the packing across dimensions for a better schedule.
+  bool useDualAxisInterleaving = false;
+  if (scalesVectorSize > 0) {
+    int64_t iK = intrinsicsK;
+    int64_t svs = scalesVectorSize;
+    int64_t lhsPackable =
+        std::min(iK, svs) * std::min(intrinsicsM, svs / std::max(iK, (int64_t)1));
+    int64_t rhsPackable =
+        std::min(iK, svs) * std::min(intrinsicsN, svs / std::max(iK, (int64_t)1));
+    if (lhsPackable >= svs && rhsPackable >= svs) {
+      useDualAxisInterleaving = true;
+    } else {
+      int64_t tryK = std::max(iK, (int64_t)1);
+      while (tryK < svs) {
+        int64_t lhsP = tryK * std::min(intrinsicsM, svs / tryK);
+        int64_t rhsP = tryK * std::min(intrinsicsN, svs / tryK);
+        if (lhsP >= svs && rhsP >= svs) {
+          intrinsicsK = static_cast<int>(tryK);
+          useDualAxisInterleaving = true;
+          break;
+        }
+        tryK <<= 1;
+      }
+      if (!useDualAxisInterleaving) {
+        intrinsicsK = static_cast<int>(
+            std::lcm((int64_t)intrinsicsK, svs));
+      }
+    }
+  }
+
   // Returns the final choice of attributes.
   if (auto intrinsicMma = dyn_cast<MMAAttr>(intrinsicAttr)) {
     // For non-scaled matmuls, the purpose of unrolling on K is to allow LHS/RHS
@@ -356,20 +398,25 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
         /*operands_interleaving_intrinsics_n=*/{},
         /*operands_interleaving_intrinsics_k=*/mmaInterleaveK);
   }
-  // For scaled matmuls, interleaving happens because we want to load all
-  // the unrolled scales with each vector load, so we need to interleave at
-  // the very last dimension for the scales. For the LHS/RHS, we load in blocks,
-  // so we don't need to interleave.
+  // For scaled matmuls, set up scale interleaving based on the chosen strategy.
   auto scaledMmaInterleaveK = DenseI64ArrayAttr::get(
       ctx, {kScaledMMAOperandLhsScale, kScaledMMAOperandRhsScale});
+  DenseI64ArrayAttr scaledMmaInterleaveM = {};
+  DenseI64ArrayAttr scaledMmaInterleaveN = {};
+  if (useDualAxisInterleaving) {
+    scaledMmaInterleaveM =
+        DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandLhsScale});
+    scaledMmaInterleaveN =
+        DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandRhsScale});
+  }
   auto intrinsicScaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
   return DataTiledScaledMMAAttr::get(
       ctx, intrinsicScaledMma.getIntrinsic(),
       intrinsicScaledMma.getLhsElemType(), intrinsicScaledMma.getRhsElemType(),
       intrinsicScaledMma.getAccElemType(), intrinsicsM, subgroupsM, intrinsicsN,
       subgroupsN, intrinsicsK, subgroupsK,
-      /*operands_interleaving_intrinsics_m=*/{},
-      /*operands_interleaving_intrinsics_n=*/{},
+      /*operands_interleaving_intrinsics_m=*/scaledMmaInterleaveM,
+      /*operands_interleaving_intrinsics_n=*/scaledMmaInterleaveN,
       /*operands_interleaving_intrinsics_k=*/scaledMmaInterleaveK);
 }
 
