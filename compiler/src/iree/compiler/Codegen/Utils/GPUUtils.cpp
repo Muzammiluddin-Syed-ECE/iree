@@ -967,15 +967,15 @@ getXorShuffleAttr(MLIRContext *context, Attribute baseConfigAttr,
                   IREE::GPU::TargetAttr target,
                   IREE::Codegen::InnerTileDescAttrInterface intrinsic,
                   ArrayRef<int64_t> reductionTileSizes, int operandIndex) {
-  FailureOr<XorShuffleParams> xorShuffleParams =
-      getXorShuffleParams(target, intrinsic, reductionTileSizes, operandIndex);
-  if (failed(xorShuffleParams)) {
-    return failure();
-  }
-  int64_t effectiverowElems = xorShuffleParams.value().rowElems;
-  int64_t numAccessElems = xorShuffleParams.value().accessElems;
+  // FailureOr<XorShuffleParams> xorShuffleParams =
+  //     getXorShuffleParams(target, intrinsic, reductionTileSizes, operandIndex);
+  // if (failed(xorShuffleParams)) {
+  //   return failure();
+  // }
+  // int64_t effectiverowElems = xorShuffleParams.value().rowElems;
+  // int64_t numAccessElems = xorShuffleParams.value().accessElems;
   auto swizzleAttr = IREE::Codegen::XORShuffleAttr::get(
-      context, effectiverowElems, numAccessElems,
+      context, 1024, 32,
       /*row_stride=*/int64_t(0),
       /*per_phase=*/int64_t(0));
   return IREE::GPU::SwizzleOperandAttr::get(context, baseConfigAttr,
