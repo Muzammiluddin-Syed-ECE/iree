@@ -13,7 +13,9 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -82,6 +84,31 @@ static bool allUsersIndicateShared(Value v) {
   return true;
 }
 
+/// Returns true if \p forallOp is a thread/warp-distributed fill: its body
+/// only writes constant values (via vector.transfer_write of a splat or
+/// linalg.fill) into the shared_outs. Such foralls arise when
+/// GPUGreedilyDistributeToThreadsPass distributes a zero-init fill, and the
+/// underlying tensor should remain private (not workgroup) memory.
+static bool isDistributedFillOnly(scf::ForallOp forallOp) {
+  auto &body = forallOp.getRegion().front();
+  for (Operation &op : body.without_terminator()) {
+    if (isa<tensor::ExtractSliceOp>(op))
+      continue;
+    if (auto fill = dyn_cast<linalg::FillOp>(op)) {
+      if (matchPattern(fill.getInputs().front(), m_Constant()))
+        continue;
+      return false;
+    }
+    if (auto write = dyn_cast<vector::TransferWriteOp>(op)) {
+      if (matchPattern(write.getVector(), m_Constant()))
+        continue;
+      return false;
+    }
+    return false;
+  }
+  return true;
+}
+
 bool isDefinitelyShared(bufferization::AllocTensorOp alloc) {
   // An allocation can be inferred as shared if it is the destination of a
   // thread distributed `scf.forall` op, or if it is used only by a
@@ -108,6 +135,13 @@ bool isDefinitelyShared(bufferization::AllocTensorOp alloc) {
     if (!forallOp ||
         !forallOpHasMappingType<gpu::GPUThreadMappingAttr,
                                 gpu::GPUWarpMappingAttr>(forallOp)) {
+      return false;
+    }
+
+    // A thread-distributed forall that only performs constant fills is an
+    // initialization artifact (e.g. zero-init of an accumulator). The
+    // underlying tensor is private per-subgroup memory, not workgroup shared.
+    if (isDistributedFillOnly(forallOp)) {
       return false;
     }
   }

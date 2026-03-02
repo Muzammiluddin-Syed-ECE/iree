@@ -533,9 +533,9 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   // // than a workgroup-level shared allocation.  The inner_tiled ops still have
   // // undistributed tensor semantics at this point (DistributeInnerTiledToLanes
   // // hasn't run yet).
-  // funcPassManager.addPass(IREE::GPU::createDecomposeRepeatsPass());
-  // funcPassManager.addPass(createCanonicalizerPass());
-  // funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(IREE::GPU::createDecomposeRepeatsPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
   funcPassManager.addPass(IREE::GPU::createDistributeInnerTiledToLanesPass());
 

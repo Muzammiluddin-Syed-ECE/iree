@@ -1736,16 +1736,12 @@ struct DecomposeRepeatsPattern
     }
 
     // ---------------------------------------------------------------
-    // 1. Create a base kind with M/N repeats removed but K/KB
-    //    preserved.  K and KB reduction repeats are handled inside
-    //    buildUnderlyingOperations (which emits one ScaledMFMAOp per
-    //    K/KB repeat with the correct scalesIdx), so we must NOT
-    //    decompose them here.
+    // 1. Create a base kind with all repeats removed (unit repeats).
+    //    All dimensions (M, N, K, KB) are decomposed at the tensor
+    //    level so each base inner_tiled op loads only its own slice.
     // ---------------------------------------------------------------
     int64_t numRepeatDims = repeats.size(); // 4 for ScaledMMAAttr (M, N, K, KB)
     SmallVector<int64_t> baseRepeats(numRepeatDims, 1);
-    baseRepeats[2] = repeats[2]; // preserve K
-    baseRepeats[3] = repeats[3]; // preserve KB
     bool allBaseRepeatsOne =
         llvm::all_of(baseRepeats, [](int64_t v) { return v == 1; });
     auto baseKind = IREE::GPU::ScaledMMAAttr::get(
@@ -1903,16 +1899,10 @@ struct DecomposeRepeatsPattern
                                            offsets, sizes, strides);
     };
 
-    // Build the parallel and reduction index ranges.
-    // K (idx 2) and KB (idx 3) are skipped — their repeats are preserved
-    // on the baseKind and handled by buildUnderlyingOperations, which emits
-    // separate ScaledMFMAOps with the correct scalesIdx for scale packing.
+    // Build the parallel and reduction index ranges for all repeat dims.
     SmallVector<int64_t> parallelDims, reductionDims;
     for (int64_t r = 0; r < numRepeatDims; ++r) {
       if (repeats[r] <= 1) {
-        continue;
-      }
-      if (r == 2 || r == 3) {
         continue;
       }
       if (innerIterTypes[r] == utils::IteratorType::reduction) {
@@ -1924,7 +1914,7 @@ struct DecomposeRepeatsPattern
 
     if (parallelDims.empty() && reductionDims.empty()) {
       return rewriter.notifyMatchFailure(
-          tiledOp, "only K/KB repeats remain; handled by lowering");
+          tiledOp, "no repeat dims > 1 to decompose");
     }
 
     // Flat Cartesian iteration: for each parallel position, chain through
@@ -1966,7 +1956,13 @@ struct DecomposeRepeatsPattern
       }
 
       // Extract the ACC sub-tile at this parallel position.
-      Value acc = extractOperandSlice(result, accIndex, repIndices);
+      // When there are no parallel dims the ACC slice is identity (the ACC
+      // has no reduction dimensions), so skip the extract to avoid creating
+      // a residual tensor.extract_slice that can cause the bufferizer to
+      // place the accumulator in workgroup memory.
+      Value acc = parallelDims.empty()
+                      ? result
+                      : extractOperandSlice(result, accIndex, repIndices);
 
       // Chain through all reduction combinations.
       for (int64_t rFlat = 0; rFlat < numReductionIters; ++rFlat) {
