@@ -261,10 +261,10 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
   case GemmSize::MediumGemm:
     if (scaled) {
       return GPUMMAHeuristicSeeds(
-          {/*bestSubgroupCountPerWorkgroup=*/8,
-           /*bestMNTileCountPerSubgroup=*/32,
+          {/*bestSubgroupCountPerWorkgroup=*/4,
+           /*bestMNTileCountPerSubgroup=*/16,
            /*bestKTileCountPerSubgroup=*/4,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
+           /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits /
                inBitWidth});
     }
     return GPUMMAHeuristicSeeds(
@@ -275,10 +275,10 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
   case GemmSize::LargeGemm:
     if (scaled) {
       return GPUMMAHeuristicSeeds(
-          {/*bestSubgroupCountPerWorkgroup=*/8,
-           /*bestMNTileCountPerSubgroup=*/32,
-           /*bestKTileCountPerSubgroup=*/2,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
+          {/*bestSubgroupCountPerWorkgroup=*/4,
+           /*bestMNTileCountPerSubgroup=*/16,
+           /*bestKTileCountPerSubgroup=*/4,
+           /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits /
                inBitWidth});
     }
     return GPUMMAHeuristicSeeds(
