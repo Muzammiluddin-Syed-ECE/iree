@@ -18,6 +18,14 @@ def AMDGPUEmulateNarrowTypePass :
   let summary = "Emulate narrow integer operations including amdgpu operations";
 }
 
+def InKernelScalePreShufflePass :
+    InterfacePass<"iree-amdgpu-in-kernel-scale-preshuffle",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Pack scale bytes across M/N intrinsic positions for "
+                "amdgpu.scaled_mfma ops, enabling packed ds_read_b32 loads "
+                "via scalesIdx byte selection";
+}
+
 // TODO: Bring the argument in line with the names used elsewhere.
 def ConvertToNVVMPass :
     Pass<"iree-convert-to-nvvm", "ModuleOp"> {

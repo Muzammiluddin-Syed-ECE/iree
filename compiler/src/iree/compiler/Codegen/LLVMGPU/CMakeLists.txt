@@ -71,6 +71,7 @@ iree_cc_library(
     "ROCDLPasses.h"
   SRCS
     "AMDGPUEmulateNarrowType.cpp"
+    "InKernelScalePreShuffle.cpp"
     "ConvertToLLVM.cpp"
     "ConvertToNVVM.cpp"
     "ConvertToROCDL.cpp"

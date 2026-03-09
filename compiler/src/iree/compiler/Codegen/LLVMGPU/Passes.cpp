@@ -617,6 +617,8 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
   funcPassManager.addPass(IREE::GPU::createLowerIREEGPUOpsPass());
   funcPassManager.addPass(createUnrollAnnotatedLoopsPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createInKernelScalePreShufflePass());
   funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
   if (pipelineOptions.enableReduceSharedMemoryBankConflicts) {
     GPUReduceBankConflictsPassOptions options = {};

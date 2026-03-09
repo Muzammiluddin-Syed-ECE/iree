@@ -262,7 +262,7 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
     if (scaled) {
       return GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/4,
-           /*bestMNTileCountPerSubgroup=*/16,
+           /*bestMNTileCountPerSubgroup=*/64,
            /*bestKTileCountPerSubgroup=*/2,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits /
                inBitWidth});
@@ -276,7 +276,7 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
     if (scaled) {
       return GPUMMAHeuristicSeeds(
           {/*bestSubgroupCountPerWorkgroup=*/4,
-           /*bestMNTileCountPerSubgroup=*/16,
+           /*bestMNTileCountPerSubgroup=*/64,
            /*bestKTileCountPerSubgroup=*/2,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits /
                inBitWidth});
@@ -915,27 +915,6 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   }
 
   IREE::Codegen::InnerTileDescAttrInterface kind = schedule->mmaKind;
-
-  // For non-small scaled GEMMs, apply repeats = [2, 2, 1, 1] to the chosen
-  // intrinsic. This groups 4 base intrinsics (2x2 in MxN) into one logical
-  // unit, which the DecomposeRepeatsPattern will later decompose. The schedule
-  // tile counts are unaffected — repeats control what happens inside each
-  // tile, not how many tiles there are. We skip small problems (M*N < 256*256)
-  // where the overhead of larger tiles would outweigh the benefit.
-  if (scaled) {
-    int64_t mSize = ShapedType::getNumElements(problem.mSizes);
-    int64_t nSize = ShapedType::getNumElements(problem.nSizes);
-    constexpr int64_t kSmallProblemThreshold = 256 * 256;
-    if (mSize * nSize >= kSmallProblemThreshold) {
-      if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(kind)) {
-        MLIRContext *ctx = target.getContext();
-        kind = IREE::GPU::ScaledMMAAttr::get(
-            ctx, smma.getIntrinsic(), smma.getLhsElemType(),
-            smma.getRhsElemType(), smma.getAccElemType(), smma.getColMajor(),
-            DenseI64ArrayAttr::get(ctx, {1, 1, 4, 1}));
-      }
-    }
-  }
 
   // Attach the MMA schedule as an attribute to the entry point export function
   // for later access in the pipeline.
