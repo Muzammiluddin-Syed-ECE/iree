@@ -766,7 +766,7 @@ pdl.pattern @annotate_scaled_matmul_like_f4E2M1FN_m64_n128_k512 : benefit(2) {
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -849,7 +849,7 @@ pdl.pattern @annotate_scaled_matmul_like_f4E2M1FN_m64_n64_k512 : benefit(1) {
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -931,7 +931,7 @@ pdl.pattern @annotate_scaled_matmul_like_f4E2M1FN_m64_n64_k1024 : benefit(1) {
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1014,7 +1014,7 @@ pdl.pattern @annotate_scaled_matmul_like_f4E2M1FN_m8_n128_k1024 : benefit(1) {
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1096,7 +1096,7 @@ pdl.pattern @annotate_scaled_matmul_like_f4E2M1FN_m8_n64_k2048 : benefit(1) {
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1157,7 +1157,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m32_n64_k2048 : benefit(1) 
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1218,7 +1218,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m64_n128_k512 : benefit(1) 
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1279,7 +1279,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m128_n128_k256 : benefit(1)
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1340,7 +1340,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m128_n256_k256 : benefit(2)
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1401,7 +1401,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m256_n256_k128 : benefit(1)
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1462,7 +1462,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m256_n256_k256 : benefit(1)
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1523,7 +1523,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m64_n64_k512 : benefit(1) {
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
@@ -1585,7 +1585,7 @@ pdl.pattern @annotate_dt_scaled_matmul_like_f4E2M1FN_m64_n64_k1024 : benefit(1) 
         // above and is disabled here as well.
         {gpu_pipeline_options =
           #iree_gpu.pipeline_options<
-            prefetch_shared_memory = false,
+            prefetch_num_stages = 0,
             no_reduce_shared_memory_bank_conflicts = true>,
         // This strategy requires 2 waves per SIMD.
           llvm_func_attrs = {"amdgpu-waves-per-eu" = "2"}}>
