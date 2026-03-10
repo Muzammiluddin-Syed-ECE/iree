@@ -599,6 +599,7 @@ def IREEGPU_ScaledMMAAttr :
     "getDistributionWorkerCount",
     "getOperandIteratorTypes",
     "buildUnderlyingOperations",
+    "getRepeatsArray",
   ]>
 ]> {
   let mnemonic = "scaled_mma_layout";
@@ -615,6 +616,12 @@ def IREEGPU_ScaledMMAAttr :
     operations allow arbitrary combinations of fp4/fp6/fp8 inputs.
 
     This intrinsic takes its four parameters as (lhs, lhs_scale, rhs, rhs_scale).
+
+    The optional |repeats| parameter specifies how many times the base
+    intrinsic is logically grouped along [M, N, K, KB]. For example,
+    `repeats = [1, 1, 4, 1]` groups 4 K-steps into one logical unit, which
+    enables packing of block scales (e.g., 4 x 1-byte -> 1 x 4-byte load
+    for MXFP4 GEMMs). When absent, defaults to `[1, 1, 1, 1]`.
   }];
 
   let assemblyFormat = "`<` struct(params) `>`";
@@ -624,7 +631,8 @@ def IREEGPU_ScaledMMAAttr :
     "::mlir::Type":$lhs_elem_type,
     "::mlir::Type":$rhs_elem_type,
     "::mlir::Type":$acc_elem_type,
-    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major
+    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major,
+    OptionalParameter<"::mlir::DenseI64ArrayAttr">:$repeats
   );
 
   let extraClassDeclaration = [{
@@ -645,7 +653,8 @@ def IREEGPU_ScaledMMAAttr :
     // Return preferred subgroup size
     int64_t getSubgroupSize() const;
 
-    /// Returns the shape of the scaled MMA operation:
+    /// Returns the effective shape of the scaled MMA operation, i.e.
+    /// the base intrinsic shape multiplied by `repeats`.
     /// ```
     ///   C += A * B
     /// ```
@@ -659,7 +668,16 @@ def IREEGPU_ScaledMMAAttr :
       ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
       return {accShape[0], accShape[1], lhsShape[1], lhsShape[2]};
     }
+
+    void getInnerDimKinds(
+        ::llvm::SmallVectorImpl<
+            ::llvm::SmallVector<ScaledMMADimKind>> &result) const;
+
+    void getInnerIteratorTypes(
+        ::llvm::SmallVectorImpl<::mlir::utils::IteratorType> &result) const;
   }];
+
+  let genVerifyDecl = 1;
 }
 
 //===----------------------------------------------------------------------===//

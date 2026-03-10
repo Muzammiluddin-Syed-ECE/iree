@@ -272,9 +272,36 @@ def IREECodegen_InnerTileDescAttrInterface :
         return {};
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the repeat counts for this inner tiled operation.
+
+        Repeats express how many times the base hardware intrinsic is logically
+        grouped along each dimension. For example, `{1, 1, 4, 1}` means the
+        intrinsic is repeated 4 times along the K dimension, which can enable
+        packing of ancillary data (e.g., block scales in MXFP4 GEMMs).
+
+        The default implementation returns an empty vector, indicating that
+        the implementor does not participate in the repeats mechanism.
+      }],
+      /*retType=*/"::llvm::SmallVector<int64_t, 4>",
+      /*methodName=*/"getRepeatsArray",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return {};
+      }]
+    >,
   ];
 
   let extraSharedClassDeclaration = [{
+    /// Returns true if this inner tiled operation has non-trivial repeats
+    /// (i.e., any repeat count > 1).
+    bool hasRepeats() const {
+      auto repeats = $_attr.getRepeatsArray();
+      return ::llvm::any_of(repeats, [](int64_t r) { return r > 1; });
+    }
+
     /// Return the expected size of the undistributed inner tile for each
     /// operand into `results`.
     void getUndistributedOperandSize(::llvm::SmallVectorImpl<int64_t>& result) const {

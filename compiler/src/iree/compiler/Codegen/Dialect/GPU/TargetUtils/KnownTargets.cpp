@@ -122,7 +122,8 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
       for (auto outTy : ScaledMMAAttr::getSupportedOutputTypes(context)) {
         scaledMmaAttrs.push_back(
             ScaledMMAAttr::get(context, wgp->scaledMmaOps[i], inTy, inTy, outTy,
-                               /*columnMajor=*/false));
+                               /*columnMajor=*/false,
+                               /*repeats=*/nullptr));
       }
     }
   }

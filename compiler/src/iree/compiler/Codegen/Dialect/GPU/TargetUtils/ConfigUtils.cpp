@@ -288,7 +288,7 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
           {/*bestSubgroupCountPerWorkgroup=*/8,
            /*bestMNTileCountPerSubgroup=*/32,
            /*bestKTileCountPerSubgroup=*/2,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
+           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits /
                inBitWidth});
     }
     return GPUMMAHeuristicSeeds(
@@ -932,6 +932,31 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
 
   IREE::Codegen::InnerTileDescAttrInterface kind = schedule->mmaKind;
 
+  SmallVector<int64_t> adjustedKTileSizes(schedule->kTileSizes.begin(),
+                                          schedule->kTileSizes.end());
+  if (scaled) {
+    if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(kind)) {
+      constexpr int64_t kRepeat = 4;
+      MLIRContext *ctx = target.getContext();
+      kind = IREE::GPU::ScaledMMAAttr::get(
+          ctx, smma.getIntrinsic(), smma.getLhsElemType(),
+          smma.getRhsElemType(), smma.getAccElemType(), smma.getColMajor(),
+          DenseI64ArrayAttr::get(ctx, {1, 1, kRepeat, 1}));
+      // The scheduler computed tile sizes for the base intrinsic. With
+      // K-repeat, each repeated-MMA covers kRepeat base K tiles internally,
+      // so we divide the outer tile counts to keep total K and shared memory
+      // usage the same.
+      if (!kDims.empty()) {
+        reductionTileSizes[kDims[0]] =
+            std::max<int64_t>(1, reductionTileSizes[kDims[0]] / kRepeat);
+      }
+      if (!adjustedKTileSizes.empty()) {
+        adjustedKTileSizes[0] =
+            std::max<int64_t>(1, adjustedKTileSizes[0] / kRepeat);
+      }
+    }
+  }
+
   // Attach the MMA schedule as an attribute to the entry point export function
   // for later access in the pipeline.
   MLIRContext *context = target.getContext();
@@ -960,19 +985,19 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     // compilation doesn't support it. Once this is fixed, we should use global
     // load DMA here when possible.
     promotionList.append({2, 3});
-    auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
+    // auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
     // TODO(#23329): Do not swizzle shapes that have no bank conflicts.
     FailureOr<Attribute> lhsSwizzleAttr =
-        getXorShuffleAttr(context, defaultConfigAttr, target, kind,
-                          schedule->kTileSizes, kMMAOperandLhs);
+        getXorShuffleAttr(context, useGlobalDma, target, kind,
+                          adjustedKTileSizes, kMMAOperandLhs);
     FailureOr<Attribute> rhsSwizzleAttr =
-        getXorShuffleAttr(context, defaultConfigAttr, target, kind,
-                          schedule->kTileSizes, kMMAOperandRhs);
+        getXorShuffleAttr(context, useGlobalDma, target, kind,
+                          adjustedKTileSizes, kMMAOperandRhs);
     if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       promotionArray = {};
     } else {
-      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, defaultConfigAttr,
-                        defaultConfigAttr};
+      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, useGlobalDma,
+        useGlobalDma};
     }
   }
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {

@@ -70,11 +70,28 @@ static tensor::PadOp traceToTensorPad(Value source) {
   return source.getDefiningOp<tensor::PadOp>();
 }
 
-/// Check if a value traces back to tensor.empty (possibly through forall args).
+/// Check if a value traces back to tensor.empty (possibly through forall args,
+/// expand_shape, collapse_shape, or swizzle_hint ops).
 static bool tracesToTensorEmpty(Value value) {
-  // Direct tensor.empty.
-  if (value.getDefiningOp<tensor::EmptyOp>()) {
-    return true;
+  // Trace through reshape and swizzle ops that preserve the allocation.
+  while (true) {
+    if (value.getDefiningOp<tensor::EmptyOp>()) {
+      return true;
+    }
+    if (auto expandShape = value.getDefiningOp<tensor::ExpandShapeOp>()) {
+      value = expandShape.getSrc();
+      continue;
+    }
+    if (auto collapseShape = value.getDefiningOp<tensor::CollapseShapeOp>()) {
+      value = collapseShape.getSrc();
+      continue;
+    }
+    if (auto swizzleHint =
+            value.getDefiningOp<IREE::Codegen::SwizzleHintOp>()) {
+      value = swizzleHint.getOperand();
+      continue;
+    }
+    break;
   }
 
   // Check if value is an extract_slice from a forall block argument.
@@ -259,15 +276,9 @@ static bool isCopyDMAConvertible(linalg::CopyOp copyOp) {
     return false;
   }
 
-  // The pre-check runs before tiling, so the output is directly a
-  // tensor.empty() (not yet inside forall block args). A simple defining op
-  // check suffices here, unlike tracesToTensorEmpty used post-tiling.
-  // TODO: If the pass pipeline changes such that copies are already inside
-  // forall ops at pre-check time, switch to tracesToTensorEmpty here to avoid
-  // undercounting availableElements (currently safe but conservative).
   int64_t availableElements = innermostDim;
   Value output = copyOp.getOutputs()[0];
-  if (output.getDefiningOp<tensor::EmptyOp>()) {
+  if (tracesToTensorEmpty(output)) {
     if (llvm::none_of(shape, ShapedType::isDynamic)) {
       availableElements = ShapedType::getNumElements(shape);
     }
