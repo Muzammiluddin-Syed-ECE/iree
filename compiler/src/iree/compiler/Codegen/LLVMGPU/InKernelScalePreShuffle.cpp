@@ -136,7 +136,7 @@ static std::optional<ScaleByteOrigin> traceByteToLDS(Value byte) {
 enum class PackMode { MFirst, KxM };
 
 // Change this constant to switch packing strategy.
-static constexpr PackMode kPackMode = PackMode::KxM;
+static constexpr PackMode kPackMode = PackMode::MFirst;
 
 struct MFMAPackInfo {
   amdgpu::ScaledMFMAOp mfmaOp;

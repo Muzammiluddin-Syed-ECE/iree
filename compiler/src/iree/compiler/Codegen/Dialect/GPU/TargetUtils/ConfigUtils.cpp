@@ -275,8 +275,8 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
   case GemmSize::LargeGemm:
     if (scaled) {
       return GPUMMAHeuristicSeeds(
-          {/*bestSubgroupCountPerWorkgroup=*/4,
-           /*bestMNTileCountPerSubgroup=*/64,
+          {/*bestSubgroupCountPerWorkgroup=*/8,
+           /*bestMNTileCountPerSubgroup=*/32,
            /*bestKTileCountPerSubgroup=*/2,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits /
                inBitWidth});
