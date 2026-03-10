@@ -1580,9 +1580,51 @@ getRepeatedSubgroupLayout(ScaledMMAIntrinsic intrinsic, int64_t operandIndex,
   MMASingleSubgroupLayout layout =
       getSingleSubgroupLayout(intrinsic, operandIndex, isAccColMajor);
   ArrayRef<ScaledMMADimKind> dimKinds = getOperandDimKinds(operandIndex);
-  for (size_t d = 0; d < layout.element.size(); d++) {
-    int64_t repIdx = static_cast<int64_t>(dimKinds[d]);
-    layout.element[d] *= repeats[repIdx];
+
+  bool isScale = (operandIndex == kScaledMMAOperandLhsScale ||
+                  operandIndex == kScaledMMAOperandRhsScale);
+  if (isScale) {
+    // Compute total repeat factor and tile sizes using standard approach.
+    int64_t totalRepeat = 1;
+    SmallVector<int64_t> tileSize(layout.element.size());
+    for (size_t d = 0; d < layout.element.size(); d++) {
+      int64_t repIdx = static_cast<int64_t>(dimKinds[d]);
+      int64_t rep = repeats[repIdx];
+      totalRepeat *= rep;
+      tileSize[d] = layout.thread[d] * layout.element[d] * rep;
+    }
+    // Pack all element into the K dimension -- contiguous in LDS after
+    // preshuffling. For LHS [M,K] K is dim 1; for RHS [K,N] K is dim 0.
+    size_t kDim = 0;
+    for (size_t d = 0; d < dimKinds.size(); d++) {
+      if (dimKinds[d] == ScaledMMADimKind::K) {
+        kDim = d;
+        break;
+      }
+    }
+    for (size_t d = 0; d < layout.element.size(); d++) {
+      layout.element[d] = (d == kDim) ? totalRepeat : 1;
+      layout.thread[d] = tileSize[d] / layout.element[d];
+    }
+    // Recompute tstrides, preserving the base layout's fastest-varying dim.
+    size_t fastestDim = 0;
+    for (size_t d = 1; d < layout.tstrides.size(); d++) {
+      if (layout.tstrides[d] < layout.tstrides[fastestDim])
+        fastestDim = d;
+    }
+    layout.tstrides[fastestDim] = 1;
+    int64_t stride = layout.thread[fastestDim];
+    for (size_t d = 0; d < layout.tstrides.size(); d++) {
+      if (d != fastestDim) {
+        layout.tstrides[d] = stride;
+        stride *= layout.thread[d];
+      }
+    }
+  } else {
+    for (size_t d = 0; d < layout.element.size(); d++) {
+      int64_t repIdx = static_cast<int64_t>(dimKinds[d]);
+      layout.element[d] *= repeats[repIdx];
+    }
   }
   return layout;
 }
@@ -1819,11 +1861,6 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
 
   FloatType f8E8M0 = builder.getF8E8M0Type();
   int64_t scalesVecSize = getScalesVectorSize();
-  Value zeroScales = arith::ConstantOp::create(
-      builder, loc,
-      SplatElementsAttr::get(
-          VectorType::get({scalesVecSize}, f8E8M0),
-          llvm::APFloat::getSmallest(f8E8M0.getFloatSemantics())));
 
   SmallVector<int64_t, 4> reps = getRepeatsArray();
   int64_t repM = reps[0], repN = reps[1], repK = reps[2], repKB = reps[3];
@@ -1887,62 +1924,22 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
                                                 offsets, strides);
   };
 
-  // Extract the full K-scale sub-vector for a given parallel position.
-  // With repeats folded into element, all K scales are contiguous.
-  auto extractScaleVec = [&](Value mdScale, int64_t scaleOpIdx,
-                             int64_t parallelRepIdx) -> Value {
-    MMASingleSubgroupLayout baseLayout =
-        getSingleSubgroupLayout(getIntrinsic(), scaleOpIdx);
-    MMASingleSubgroupLayout repLayout =
-        getRepeatedSubgroupLayout(getIntrinsic(), scaleOpIdx, reps);
-    ArrayRef<ScaledMMADimKind> dimKinds = getOperandDimKinds(scaleOpIdx);
-
-    SmallVector<int64_t> offsets, sizes;
-    for (size_t d = 0; d < baseLayout.outer.size(); d++) {
-      ScaledMMADimKind kind = dimKinds[d];
-      if (kind == ScaledMMADimKind::K || kind == ScaledMMADimKind::KB) {
-        offsets.push_back(0);
-        sizes.push_back(repLayout.element[d]);
-      } else {
-        offsets.push_back(parallelRepIdx * baseLayout.element[d]);
-        sizes.push_back(baseLayout.element[d]);
-      }
-    }
-
-    SmallVector<int64_t> strides(offsets.size(), 1);
-    Value slice = vector::ExtractStridedSliceOp::create(
-        builder, loc, mdScale, offsets, sizes, strides);
-    int64_t numElems = 1;
-    for (int64_t s : sizes)
-      numElems *= s;
-    auto flatType = VectorType::get(
-        {numElems}, cast<VectorType>(mdScale.getType()).getElementType());
-    Value flatVec =
-        vector::ShapeCastOp::create(builder, loc, flatType, slice);
-
-    if (numElems >= scalesVecSize)
-      return flatVec;
-    Value padded = zeroScales;
-    for (int64_t i = 0; i < numElems; i++) {
-      Value elem = vector::ExtractOp::create(builder, loc, flatVec, i);
-      padded = vector::InsertOp::create(builder, loc, elem, padded, i);
-    }
-    return padded;
-  };
-
   Value mdAcc = mdOperands[kScaledMMAOperandAcc];
+
+  // With repeats=[2,2,2,1], each per-lane scale vector is exactly 4 bytes
+  // (repM*repK for LHS, repK*repN for RHS), matching scalesVecSize.
+  // Shape-cast the full multi-dim scale to a flat vector once and reuse
+  // it for all MFMA calls; scalesIdx selects the byte within the 4-byte word.
+  auto flatScaleType = VectorType::get({scalesVecSize}, f8E8M0);
+  Value lhsScaleVec = vector::ShapeCastOp::create(
+      builder, loc, flatScaleType, mdOperands[kScaledMMAOperandLhsScale]);
+  Value rhsScaleVec = vector::ShapeCastOp::create(
+      builder, loc, flatScaleType, mdOperands[kScaledMMAOperandRhsScale]);
 
   for (int64_t rm = 0; rm < repM; rm++) {
     for (int64_t rn = 0; rn < repN; rn++) {
       SmallVector<int64_t> accRepIdx = {rm, rn, 0, 0};
       Value accSlice = extractSlice(mdAcc, kScaledMMAOperandAcc, accRepIdx);
-
-      Value lhsScaleVec = extractScaleVec(
-          mdOperands[kScaledMMAOperandLhsScale],
-          kScaledMMAOperandLhsScale, rm);
-      Value rhsScaleVec = extractScaleVec(
-          mdOperands[kScaledMMAOperandRhsScale],
-          kScaledMMAOperandRhsScale, rn);
 
       for (int64_t rk = 0; rk < repK; rk++) {
         for (int64_t rkb = 0; rkb < repKB; rkb++) {
@@ -1959,8 +1956,10 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
           Value curRhs = rhsSlice;
           Value curLhsScales = lhsScaleVec;
           Value curRhsScales = rhsScaleVec;
-          int64_t scalesIdxA = rk;
-          int64_t scalesIdxB = rk;
+          // LHS scale layout [M,K]: byte = rm * repK + rk (row-major)
+          // RHS scale layout [K,N]: byte = rk * repN + rn (row-major)
+          int64_t scalesIdxA = rm * repK + rk;
+          int64_t scalesIdxB = rk * repN + rn;
 
           if (getColMajor()) {
             std::swap(curLhs, curRhs);

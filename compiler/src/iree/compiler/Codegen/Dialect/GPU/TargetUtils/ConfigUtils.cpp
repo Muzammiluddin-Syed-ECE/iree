@@ -878,6 +878,35 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   LDBG() << "Target Subgroup size: " << targetSubgroupSize;
   LDBG() << "Schedule: " << schedule;
 
+  // Apply repeats to the schedule BEFORE computing tile sizes so that
+  // getTotalMSize()/getTotalNSize() reflect the inflated intrinsic shape.
+  IREE::Codegen::InnerTileDescAttrInterface kind = schedule->mmaKind;
+  SmallVector<int64_t> adjustedKTileSizes(schedule->kTileSizes.begin(),
+                                          schedule->kTileSizes.end());
+  if (scaled) {
+    if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(kind)) {
+      constexpr int64_t mRepeat = 2, nRepeat = 2, kRepeat = 2;
+      MLIRContext *ctx = target.getContext();
+      kind = IREE::GPU::ScaledMMAAttr::get(
+          ctx, smma.getIntrinsic(), smma.getLhsElemType(),
+          smma.getRhsElemType(), smma.getAccElemType(), smma.getColMajor(),
+          DenseI64ArrayAttr::get(ctx, {mRepeat, nRepeat, kRepeat, 1}));
+      // Inflate the schedule's intrinsic sizes to match the repeated intrinsic.
+      schedule->mSizes.back() *= mRepeat;
+      schedule->nSizes.back() *= nRepeat;
+      schedule->kSizes[0] *= kRepeat;
+      // Halve tile counts: each repeated intrinsic covers more elements,
+      // so fewer tiles are needed to cover the same workgroup region.
+      schedule->mTileSizes.back() =
+          std::max<int64_t>(1, schedule->mTileSizes.back() / mRepeat);
+      schedule->nTileSizes.back() =
+          std::max<int64_t>(1, schedule->nTileSizes.back() / nRepeat);
+      schedule->kTileSizes[0] =
+          std::max<int64_t>(1, schedule->kTileSizes[0] / kRepeat);
+      adjustedKTileSizes[0] = schedule->kTileSizes[0];
+    }
+  }
+
   SmallVector<int64_t> workgroupTileSizes(bounds.size(), 0);
   SmallVector<int64_t> reductionTileSizes(bounds.size(), 0);
   SmallVector<int64_t> subgroupTileSizes(bounds.size(), 0);
@@ -928,33 +957,6 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   // Similarly the reduction tile size is just the post-packing tile count.
   for (auto [i, kDim] : llvm::enumerate(kDims)) {
     reductionTileSizes[kDim] = schedule->kTileSizes[i];
-  }
-
-  IREE::Codegen::InnerTileDescAttrInterface kind = schedule->mmaKind;
-
-  SmallVector<int64_t> adjustedKTileSizes(schedule->kTileSizes.begin(),
-                                          schedule->kTileSizes.end());
-  if (scaled) {
-    if (auto smma = dyn_cast<IREE::GPU::ScaledMMAAttr>(kind)) {
-      constexpr int64_t kRepeat = 4;
-      MLIRContext *ctx = target.getContext();
-      kind = IREE::GPU::ScaledMMAAttr::get(
-          ctx, smma.getIntrinsic(), smma.getLhsElemType(),
-          smma.getRhsElemType(), smma.getAccElemType(), smma.getColMajor(),
-          DenseI64ArrayAttr::get(ctx, {1, 1, kRepeat, 1}));
-      // The scheduler computed tile sizes for the base intrinsic. With
-      // K-repeat, each repeated-MMA covers kRepeat base K tiles internally,
-      // so we divide the outer tile counts to keep total K and shared memory
-      // usage the same.
-      if (!kDims.empty()) {
-        reductionTileSizes[kDims[0]] =
-            std::max<int64_t>(1, reductionTileSizes[kDims[0]] / kRepeat);
-      }
-      if (!adjustedKTileSizes.empty()) {
-        adjustedKTileSizes[0] =
-            std::max<int64_t>(1, adjustedKTileSizes[0] / kRepeat);
-      }
-    }
   }
 
   // Attach the MMA schedule as an attribute to the entry point export function
