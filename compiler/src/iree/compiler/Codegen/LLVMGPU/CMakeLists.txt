@@ -70,6 +70,7 @@ iree_cc_library(
     "Passes.h"
     "ROCDLPasses.h"
   SRCS
+    "AMDGPUCoalesceScaleReads.cpp"
     "AMDGPUEmulateNarrowType.cpp"
     "ConvertToLLVM.cpp"
     "ConvertToNVVM.cpp"
