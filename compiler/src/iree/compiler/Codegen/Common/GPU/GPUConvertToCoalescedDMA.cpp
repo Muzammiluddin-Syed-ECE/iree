@@ -70,43 +70,42 @@ static tensor::PadOp traceToTensorPad(Value source) {
   return source.getDefiningOp<tensor::PadOp>();
 }
 
-/// Check if a value traces back to tensor.empty (possibly through forall args).
+/// Check if a value traces back to tensor.empty, possibly through
+/// expand_shape, swizzle_hint, extract_slice from forall block args, etc.
 static bool tracesToTensorEmpty(Value value) {
-  // Direct tensor.empty.
-  if (value.getDefiningOp<tensor::EmptyOp>()) {
+  if (value.getDefiningOp<tensor::EmptyOp>())
     return true;
-  }
 
-  // Check if value is an extract_slice from a forall block argument.
+  if (auto expandOp = value.getDefiningOp<tensor::ExpandShapeOp>())
+    return tracesToTensorEmpty(expandOp.getSrc());
+
+  if (auto swizzleOp =
+          value.getDefiningOp<IREE::Codegen::SwizzleHintOp>())
+    return tracesToTensorEmpty(swizzleOp.getOperand());
+
   auto extractSlice = value.getDefiningOp<tensor::ExtractSliceOp>();
-  if (!extractSlice) {
+  if (!extractSlice)
     return false;
-  }
 
   auto blockArg = dyn_cast<BlockArgument>(extractSlice.getSource());
-  if (!blockArg) {
+  if (!blockArg)
     return false;
-  }
 
   auto forallOp = dyn_cast<scf::ForallOp>(blockArg.getOwner()->getParentOp());
-  if (!forallOp) {
+  if (!forallOp)
     return false;
-  }
 
-  // Find the corresponding shared_out init value.
   unsigned numIVs = forallOp.getInductionVars().size();
   unsigned argIndex = blockArg.getArgNumber();
-  if (argIndex < numIVs) {
+  if (argIndex < numIVs)
     return false;
-  }
 
   unsigned sharedOutIndex = argIndex - numIVs;
-  if (sharedOutIndex >= forallOp.getOutputs().size()) {
+  if (sharedOutIndex >= forallOp.getOutputs().size())
     return false;
-  }
 
   Value initValue = forallOp.getOutputs()[sharedOutIndex];
-  return initValue.getDefiningOp<tensor::EmptyOp>() != nullptr;
+  return tracesToTensorEmpty(initValue);
 }
 
 /// Check if the source of a copy traces to a fat_raw_buffer source.
@@ -259,15 +258,9 @@ static bool isCopyDMAConvertible(linalg::CopyOp copyOp) {
     return false;
   }
 
-  // The pre-check runs before tiling, so the output is directly a
-  // tensor.empty() (not yet inside forall block args). A simple defining op
-  // check suffices here, unlike tracesToTensorEmpty used post-tiling.
-  // TODO: If the pass pipeline changes such that copies are already inside
-  // forall ops at pre-check time, switch to tracesToTensorEmpty here to avoid
-  // undercounting availableElements (currently safe but conservative).
   int64_t availableElements = innermostDim;
   Value output = copyOp.getOutputs()[0];
-  if (output.getDefiningOp<tensor::EmptyOp>()) {
+  if (tracesToTensorEmpty(output)) {
     if (llvm::none_of(shape, ShapedType::isDynamic)) {
       availableElements = ShapedType::getNumElements(shape);
     }
@@ -1016,8 +1009,7 @@ private:
     int64_t availableElements = innermostDim;
     if (auto copyOp = dyn_cast<linalg::CopyOp>(op.getOperation())) {
       Value output = copyOp.getOutputs()[0];
-      if (output.getDefiningOp<tensor::EmptyOp>()) {
-        // Can linearize all dimensions - compute total static elements.
+      if (tracesToTensorEmpty(output)) {
         if (llvm::none_of(shape, ShapedType::isDynamic)) {
           availableElements = ShapedType::getNumElements(shape);
         }
