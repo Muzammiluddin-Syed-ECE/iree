@@ -50,6 +50,126 @@ struct ConvertRawBufferCast final
   }
 };
 
+struct ConvertGatherToLDS final : ConversionPattern {
+  ConvertGatherToLDS(const TypeConverter &typeConverter, MLIRContext *context)
+      : ConversionPattern(typeConverter,
+                          amdgpu::GatherToLDSOp::getOperationName(),
+                          /*benefit=*/1, context) {}
+
+  /// Linearize multi-dim indices into a flat byte offset for a 1D i8 memref.
+  /// oldShape is the original sub-byte memref shape, packFactor = 8/elemBits.
+  SmallVector<Value> linearizeIndices(ConversionPatternRewriter &rewriter,
+                                      Location loc,
+                                      ArrayRef<Value> indices,
+                                      MemRefType oldType,
+                                      MemRefType newType) const {
+    int64_t oldRank = oldType.getRank();
+    int64_t newRank = newType.getRank();
+    if (oldRank == newRank)
+      return SmallVector<Value>(indices);
+
+    // Compute pack factor from element bit widths.
+    unsigned oldBits = oldType.getElementTypeBitWidth();
+    unsigned newBits = newType.getElementTypeBitWidth();
+    int64_t packFactor = (oldBits < newBits) ? 1 : (newBits / oldBits);
+    // When going from sub-byte to byte: packFactor = oldBits/newBits inverted.
+    // Actually: packFactor = 8 / oldBits when new type is i8.
+    if (oldBits < 8 && newBits == 8) {
+      packFactor = 8 / oldBits;
+    } else {
+      packFactor = 1;
+    }
+
+    ArrayRef<int64_t> oldShape = oldType.getShape();
+
+    // Linearize: flat = i0*stride0 + i1*stride1 + ... + in
+    // where stride_k = product of dims [k+1, rank)
+    Value flat = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    for (int64_t i = 0; i < oldRank; ++i) {
+      int64_t stride = 1;
+      for (int64_t j = i + 1; j < oldRank; ++j) {
+        stride *= oldShape[j];
+      }
+      Value strideVal =
+          arith::ConstantIndexOp::create(rewriter, loc, stride);
+      Value term = arith::MulIOp::create(rewriter, loc, indices[i], strideVal);
+      flat = arith::AddIOp::create(rewriter, loc, flat, term);
+    }
+
+    // Divide by pack factor to get byte offset.
+    if (packFactor > 1) {
+      Value pf = arith::ConstantIndexOp::create(rewriter, loc, packFactor);
+      flat = arith::DivUIOp::create(rewriter, loc, flat, pf);
+    }
+
+    return {flat};
+  }
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto gatherOp = cast<amdgpu::GatherToLDSOp>(op);
+
+    auto segmentAttr = op->getAttrOfType<DenseI32ArrayAttr>(
+        gatherOp.getOperandSegmentSizeAttr());
+    if (!segmentAttr)
+      return failure();
+    ArrayRef<int32_t> segments = segmentAttr.asArrayRef();
+    int32_t numSrcIndices = segments[1];
+    int32_t numDstIndices = segments[3];
+
+    Value newSrc = operands[0];
+    SmallVector<Value> oldSrcIndices(operands.begin() + 1,
+                                     operands.begin() + 1 + numSrcIndices);
+    Value newDst = operands[1 + numSrcIndices];
+    SmallVector<Value> oldDstIndices(
+        operands.begin() + 2 + numSrcIndices,
+        operands.begin() + 2 + numSrcIndices + numDstIndices);
+
+    auto oldSrcType = cast<MemRefType>(gatherOp.getSrc().getType());
+    auto oldDstType = cast<MemRefType>(gatherOp.getDst().getType());
+    auto newSrcType = cast<MemRefType>(newSrc.getType());
+    auto newDstType = cast<MemRefType>(newDst.getType());
+
+    // Compute new transfer type for sub-byte element types.
+    Type oldTransferType = gatherOp.getTransferType();
+    auto oldVecType = dyn_cast<VectorType>(oldTransferType);
+    unsigned elemBits =
+        oldVecType ? oldVecType.getElementTypeBitWidth()
+                   : oldTransferType.getIntOrFloatBitWidth();
+
+    TypeAttr newTransferTypeAttr = gatherOp.getTransferTypeAttr();
+    if (elemBits < 8) {
+      unsigned packFactor = 8 / elemBits;
+      if (oldVecType) {
+        int64_t newNumElements =
+            std::max<int64_t>(1, oldVecType.getNumElements() / packFactor);
+        newTransferTypeAttr = TypeAttr::get(
+            VectorType::get({newNumElements}, rewriter.getIntegerType(8)));
+      } else {
+        newTransferTypeAttr = TypeAttr::get(rewriter.getIntegerType(8));
+      }
+    }
+
+    // If nothing changed, signal no match.
+    if (newSrcType == oldSrcType && newDstType == oldDstType &&
+        newTransferTypeAttr == gatherOp.getTransferTypeAttr()) {
+      return failure();
+    }
+
+    Location loc = op->getLoc();
+    SmallVector<Value> newSrcIndices =
+        linearizeIndices(rewriter, loc, oldSrcIndices, oldSrcType, newSrcType);
+    SmallVector<Value> newDstIndices =
+        linearizeIndices(rewriter, loc, oldDstIndices, oldDstType, newDstType);
+
+    rewriter.replaceOpWithNewOp<amdgpu::GatherToLDSOp>(
+        op, newSrc, newSrcIndices, newDst, newDstIndices, newTransferTypeAttr,
+        gatherOp.getAsyncAttr());
+    return success();
+  }
+};
+
 struct AMDGPUEmulateNarrowTypePass final
     : impl::AMDGPUEmulateNarrowTypePassBase<AMDGPUEmulateNarrowTypePass> {
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -69,6 +189,10 @@ struct AMDGPUEmulateNarrowTypePass final
               opLegalCallback);
           patterns.add<ConvertRawBufferCast>(typeConverter,
                                              patterns.getContext());
+          // Handle gather_to_lds via generic conversion pattern to avoid
+          // OpAdaptor issues with AttrSizedOperandSegments.
+          patterns.add<ConvertGatherToLDS>(typeConverter,
+                                           patterns.getContext());
         };
     if (failed(emulateNarrowType(getOperation(), /*disableAtomic=*/true,
                                  populateAMDGPUPatterns))) {

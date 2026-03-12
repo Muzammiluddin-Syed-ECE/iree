@@ -853,21 +853,28 @@ struct GPUConvertToCoalescedDMAPass final
     });
 
     if (hasDMAIntent) {
-      bool allConvertible = llvm::all_of(promotedCopies, isCopyDMAConvertible);
+      // Only check convertibility of copies that already have DMA intent.
+      // DerivedThreadConfigAttr copies keep their config unchanged.
+      bool allDMAConvertible = true;
+      for (linalg::CopyOp copyOp : promotedCopies) {
+        if (getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(copyOp) &&
+            !isCopyDMAConvertible(copyOp)) {
+          allDMAConvertible = false;
+        }
+      }
       LLVM_DEBUG({
-        if (!allConvertible) {
-          llvm::dbgs() << "DMA pre-check: not all copies convertible, "
-                       << "downgrading " << promotedCopies.size()
-                       << " copies to derived_thread_config\n";
+        if (!allDMAConvertible) {
+          llvm::dbgs() << "DMA pre-check: not all DMA copies convertible, "
+                       << "downgrading DMA copies to derived_thread_config\n";
         }
       });
       for (linalg::CopyOp copyOp : promotedCopies) {
-        if (allConvertible) {
-          setLoweringConfig(copyOp,
-                            IREE::GPU::UseGlobalLoadDMAAttr::get(context));
-        } else {
-          setLoweringConfig(copyOp,
-                            IREE::GPU::DerivedThreadConfigAttr::get(context));
+        if (getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(copyOp)) {
+          if (!allDMAConvertible) {
+            setLoweringConfig(
+                copyOp,
+                IREE::GPU::DerivedThreadConfigAttr::get(context));
+          }
         }
       }
     }
