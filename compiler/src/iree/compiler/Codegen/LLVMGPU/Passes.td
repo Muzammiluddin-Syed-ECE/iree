@@ -13,6 +13,11 @@ include "mlir/Pass/PassBase.td"
 // LLVMGPU Passes (keep alphabetical)
 //------------------------------------------------------------------------------
 
+def AMDGPUCoalesceScaleReadsPass :
+    InterfacePass<"iree-amdgpu-coalesce-scale-reads", "mlir::FunctionOpInterface"> {
+  let summary = "Replace strided LDS scale reads with contiguous dword reads for MXFP4 MFMA ops";
+}
+
 def AMDGPUEmulateNarrowTypePass :
     Pass<"iree-amdgpu-emulate-narrow-type", ""> {
   let summary = "Emulate narrow integer operations including amdgpu operations";

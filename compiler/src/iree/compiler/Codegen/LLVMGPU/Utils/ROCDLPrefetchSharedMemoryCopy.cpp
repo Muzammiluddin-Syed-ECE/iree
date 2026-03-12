@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/LLVMGPU/Utils/LLVMGPUUtils.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
@@ -98,16 +99,21 @@ static bool hasDirectGatherToLDS(scf::ForOp forOp) {
 }
 
 /// Checks if a loop contains gather_to_lds operations nested inside regions
-/// (e.g., inside scf.if). Such conditional async copies can't be reliably
-/// pipelined.
+/// that prevent reliable pipelining (e.g., inside scf.for or other loops).
+/// gather_to_lds inside scf.if is allowed because the condition is typically
+/// loop-invariant (e.g., thread_id < N), and the scf.if can be treated as
+/// a load unit during pipelining.
 static bool hasNestedGatherToLDS(scf::ForOp forOp) {
   for (Operation &op : forOp.getBody()->getOperations()) {
-    if (op.getNumRegions() > 0) {
-      bool hasNested = false;
-      op.walk([&](amdgpu::GatherToLDSOp) { hasNested = true; });
-      if (hasNested) {
-        return true;
-      }
+    if (op.getNumRegions() == 0)
+      continue;
+    // Allow scf.if — conditional DMA with loop-invariant guards is safe.
+    if (isa<scf::IfOp>(op))
+      continue;
+    bool hasNested = false;
+    op.walk([&](amdgpu::GatherToLDSOp) { hasNested = true; });
+    if (hasNested) {
+      return true;
     }
   }
   return false;
@@ -136,7 +142,8 @@ static bool hasStreamCopyOps(scf::ForOp forOp) {
   return hasGlobalRead && hasSharedWrite;
 }
 
-/// Trace through view-like ops to find the root allocation.
+/// Trace through view-like ops (and SwizzleHintOp) to find the root
+/// allocation.
 static memref::AllocOp traceToAllocation(Value base) {
   while (base) {
     if (auto alloc = base.getDefiningOp<memref::AllocOp>()) {
@@ -144,6 +151,9 @@ static memref::AllocOp traceToAllocation(Value base) {
     }
     if (auto viewOp = base.getDefiningOp<ViewLikeOpInterface>()) {
       base = viewOp.getViewSource();
+    } else if (auto hintOp =
+                   base.getDefiningOp<IREE::Codegen::SwizzleHintOp>()) {
+      base = hintOp.getOperand();
     } else {
       break;
     }
@@ -265,8 +275,38 @@ static LogicalResult cloneViewOpsInsideLoop(memref::AllocOp alloc,
   return success();
 }
 
+/// After multi-buffering an alloc that originally had a SwizzleHintOp,
+/// reinsert the swizzle_hint between the per-iteration subview and its
+/// expand_shape users inside the loop. The swizzle is applied per-slot
+/// (not across the full multi-buffered alloc) so each iteration gets
+/// independent XOR shuffling.
+static void reinsertSwizzleHints(memref::AllocOp newAlloc, scf::ForOp forOp,
+                                 Attribute swizzleAttr) {
+  OpBuilder builder(forOp.getContext());
+  for (Operation *user : newAlloc->getUsers()) {
+    auto subviewOp = dyn_cast<memref::SubViewOp>(user);
+    if (!subviewOp || !forOp->isProperAncestor(subviewOp))
+      continue;
+    for (OpOperand &use :
+         llvm::make_early_inc_range(subviewOp.getResult().getUses())) {
+      builder.setInsertionPoint(use.getOwner());
+      auto hintOp = IREE::Codegen::SwizzleHintOp::create(
+          builder, subviewOp.getLoc(), subviewOp.getResult().getType(),
+          subviewOp.getResult(),
+          cast<IREE::Codegen::SwizzleAttrInterface>(swizzleAttr));
+      use.set(hintOp.getResult());
+    }
+  }
+}
+
 /// Multi-buffer LDS allocations used by gather_to_lds operations.
 /// This enables double-buffering for pipelined async copies.
+///
+/// For allocs wrapped in SwizzleHintOp, the hint is temporarily stripped
+/// so memref::multiBuffer's type propagation (which handles ExpandShapeOp
+/// etc. but not SwizzleHintOp) works correctly.  After multi-buffering,
+/// swizzle_hints are reinserted on the per-iteration subviews so each
+/// buffer slot gets independent XOR swizzling.
 static LogicalResult multiBufferLDSAllocations(scf::ForOp forOp,
                                                unsigned numBuffers) {
   SetVector<memref::AllocOp> sharedAllocs;
@@ -287,7 +327,22 @@ static LogicalResult multiBufferLDSAllocations(scf::ForOp forOp,
 
   LDBG() << "Multi-buffering " << sharedAllocs.size() << " LDS allocations";
 
-  // First, clone view ops inside the loop for each allocation
+  // Strip SwizzleHintOps from alloc chains so multiBuffer's type propagation
+  // (replaceUsesAndPropagateType) can handle the clean ViewLikeOpInterface
+  // chain (alloc → expand_shape → ...).  Record which allocs had hints.
+  DenseMap<memref::AllocOp, Attribute> swizzleAttrs;
+  for (memref::AllocOp alloc : sharedAllocs) {
+    for (Operation *user : llvm::make_early_inc_range(alloc->getUsers())) {
+      if (auto hintOp = dyn_cast<IREE::Codegen::SwizzleHintOp>(user)) {
+        swizzleAttrs[alloc] = hintOp.getSwizzle();
+        LDBG() << "Stripping swizzle hint from alloc: " << *alloc;
+        hintOp.getResult().replaceAllUsesWith(hintOp.getOperand());
+        hintOp->erase();
+      }
+    }
+  }
+
+  // Clone view ops inside the loop for each allocation
   for (memref::AllocOp alloc : sharedAllocs) {
     if (failed(cloneViewOpsInsideLoop(alloc, forOp))) {
       LDBG() << "Failed to clone view ops for: " << *alloc;
@@ -295,16 +350,24 @@ static LogicalResult multiBufferLDSAllocations(scf::ForOp forOp,
     }
   }
 
-  // Now apply multi-buffering
+  // Apply multi-buffering, then reinsert swizzle hints for allocs that
+  // originally had them.
   for (memref::AllocOp alloc : sharedAllocs) {
     Location loc = alloc.getLoc();
-    if (failed(memref::multiBuffer(alloc, numBuffers,
-                                   /*skipOverrideAnalysis=*/true))) {
+    auto swizzleIt = swizzleAttrs.find(alloc);
+    FailureOr<memref::AllocOp> newAllocOr = memref::multiBuffer(
+        alloc, numBuffers, /*skipOverrideAnalysis=*/true);
+    if (failed(newAllocOr)) {
       LDBG() << "Failed to multi-buffer LDS allocation at " << loc;
       return failure();
     }
     LDBG() << "Multi-buffered LDS allocation with " << numBuffers
            << " buffers at " << loc;
+
+    if (swizzleIt != swizzleAttrs.end()) {
+      reinsertSwizzleHints(*newAllocOr, forOp, swizzleIt->second);
+      LDBG() << "Reinserted swizzle hints for multi-buffered alloc at " << loc;
+    }
   }
 
   return success();
@@ -403,6 +466,16 @@ static LogicalResult identifyRootOperations(
       if (isa<amdgpu::GatherToLDSOp>(op)) {
         loadRoots.push_back(&op);
         LDBG() << "  Load root: " << op;
+      } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+        // scf.if containing gather_to_lds: treat the entire scf.if as a load
+        // root. This handles cases where only a subset of wavefronts
+        // participate in DMA (e.g., scale operands with fewer warps).
+        bool containsGather = false;
+        ifOp->walk([&](amdgpu::GatherToLDSOp) { containsGather = true; });
+        if (containsGather) {
+          loadRoots.push_back(&op);
+          LDBG() << "  Load root (scf.if with gather_to_lds): " << op;
+        }
       } else if (isa<scf::YieldOp>(op)) {
         computeRoots.push_back(&op);
         LDBG() << "  Compute root: " << op;
@@ -472,6 +545,20 @@ static LogicalResult computeBackwardSlice(ArrayRef<Operation *> roots,
     // getBackwardSlice doesn't include the root itself, so add it explicitly
     slice.insert(root);
     slice.insert_range(rootSlice);
+
+    // If the root itself is a scf.if, compute backward slices of all nested
+    // operations to capture dependencies like multi-buffered LDS subviews.
+    // getBackwardSlice on a scf.if only captures the condition operand, not
+    // dependencies of operations inside the if's regions.
+    if (auto ifOp = dyn_cast<scf::IfOp>(root)) {
+      ifOp.getOperation()->walk([&](Operation *nestedOp) {
+        if (nestedOp != ifOp.getOperation()) {
+          SetVector<Operation *> nestedSlice;
+          (void)getBackwardSlice(nestedOp, &nestedSlice, options);
+          slice.insert_range(nestedSlice);
+        }
+      });
+    }
 
     // Also add any parent scf.if operations that contain this root
     // This is necessary because roots inside scf.if need the if to be scheduled
@@ -1058,13 +1145,22 @@ static Operation *findFirstSharedRead(Block::iterator begin,
   return nullptr;
 }
 
-/// Find the last gather_to_lds operation in a block range.
+/// Check if an operation is or contains a gather_to_lds operation.
+static bool isOrContainsGatherToLDS(Operation *op) {
+  if (isa<amdgpu::GatherToLDSOp>(op))
+    return true;
+  return op->walk([](amdgpu::GatherToLDSOp) { return WalkResult::interrupt(); })
+      .wasInterrupted();
+}
+
+/// Find the last operation in a block range that is or contains gather_to_lds.
+/// This handles both direct gather_to_lds ops and scf.if blocks that wrap them.
 static Operation *findLastGatherToLDS(Block::iterator begin,
                                       Block::iterator end) {
   auto rbegin = std::make_reverse_iterator(end);
   auto rend = std::make_reverse_iterator(begin);
   for (auto it = rbegin; it != rend; ++it) {
-    if (isa<amdgpu::GatherToLDSOp>(&*it)) {
+    if (isOrContainsGatherToLDS(&*it)) {
       return &*it;
     }
   }
@@ -1089,7 +1185,7 @@ static void insertPrologueAsyncMarks(RewriterBase &rewriter, Location loc,
                                      unsigned numStages) {
   SmallVector<Operation *> prologueGathers;
   for (auto it = parentBlock->begin(); it != loopStart; ++it) {
-    if (isa<amdgpu::GatherToLDSOp>(&*it)) {
+    if (isOrContainsGatherToLDS(&*it)) {
       prologueGathers.push_back(&*it);
     }
   }
@@ -1252,6 +1348,12 @@ FailureOr<scf::ForOp> prefetchSharedMemoryCopy(RewriterBase &rewriter,
     // count.
     if (numStages > 3) {
       LDBG() << "Async copy mode supports at most 3 stages, got " << numStages;
+      return failure();
+    }
+    // Check loop iteration count before multi-buffering. Multi-buffering
+    // irreversibly mutates the IR, so we must bail out early if the loop
+    // cannot be pipelined (e.g., too few iterations).
+    if (failed(checkLoopIterations(forOp))) {
       return failure();
     }
     // Apply multi-buffering: numStages buffers for N-stage pipelining

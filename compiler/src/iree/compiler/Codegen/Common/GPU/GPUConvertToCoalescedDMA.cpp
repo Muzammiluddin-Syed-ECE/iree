@@ -102,35 +102,34 @@ static bool tracesToTensorEmpty(Value value) {
   // Direct tensor.empty.
   if (value.getDefiningOp<tensor::EmptyOp>()) {
     return true;
-  }
 
-  // Check if value is an extract_slice from a forall block argument.
+  if (auto expandOp = value.getDefiningOp<tensor::ExpandShapeOp>())
+    return tracesToTensorEmpty(expandOp.getSrc());
+
+  if (auto swizzleOp =
+          value.getDefiningOp<IREE::Codegen::SwizzleHintOp>())
+    return tracesToTensorEmpty(swizzleOp.getOperand());
+
   auto extractSlice = value.getDefiningOp<tensor::ExtractSliceOp>();
-  if (!extractSlice) {
+  if (!extractSlice)
     return false;
-  }
 
   auto blockArg = dyn_cast<BlockArgument>(extractSlice.getSource());
-  if (!blockArg) {
+  if (!blockArg)
     return false;
-  }
 
   auto forallOp = dyn_cast<scf::ForallOp>(blockArg.getOwner()->getParentOp());
-  if (!forallOp) {
+  if (!forallOp)
     return false;
-  }
 
-  // Find the corresponding shared_out init value.
   unsigned numIVs = forallOp.getInductionVars().size();
   unsigned argIndex = blockArg.getArgNumber();
-  if (argIndex < numIVs) {
+  if (argIndex < numIVs)
     return false;
-  }
 
   unsigned sharedOutIndex = argIndex - numIVs;
-  if (sharedOutIndex >= forallOp.getOutputs().size()) {
+  if (sharedOutIndex >= forallOp.getOutputs().size())
     return false;
-  }
 
   // Trace through swizzle ops on the forall init value as well.
   Value initValue =
@@ -863,32 +862,22 @@ struct GPUConvertToCoalescedDMAPass final
     // Note: GatherOps are excluded — they come from input IR (not from
     // GPUPromoteMatmulOperands) and are handled independently by
     // ConvertGatherToCoalescedDMA.
-    SmallVector<linalg::CopyOp> promotedCopies;
-    bool hasDMAIntent = false;
+    SmallVector<linalg::CopyOp> dmaCopies;
     funcOp->walk([&](linalg::CopyOp copyOp) {
       if (getLoweringConfig<IREE::GPU::UseGlobalLoadDMAAttr>(copyOp)) {
-        hasDMAIntent = true;
-        promotedCopies.push_back(copyOp);
-      } else if (getLoweringConfig<IREE::GPU::DerivedThreadConfigAttr>(
-                     copyOp)) {
-        promotedCopies.push_back(copyOp);
+        dmaCopies.push_back(copyOp);
       }
     });
 
-    if (hasDMAIntent) {
-      bool allConvertible = llvm::all_of(promotedCopies, isCopyDMAConvertible);
-      LLVM_DEBUG({
-        if (!allConvertible) {
-          llvm::dbgs() << "DMA pre-check: not all copies convertible, "
-                       << "downgrading " << promotedCopies.size()
-                       << " copies to derived_thread_config\n";
-        }
-      });
-      for (linalg::CopyOp copyOp : promotedCopies) {
-        if (allConvertible) {
-          setLoweringConfig(copyOp,
-                            IREE::GPU::UseGlobalLoadDMAAttr::get(context));
-        } else {
+    if (!dmaCopies.empty()) {
+      bool allDMAConvertible =
+          llvm::all_of(dmaCopies, isCopyDMAConvertible);
+      if (!allDMAConvertible) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "DMA pre-check: not all DMA copies convertible, "
+                   << "downgrading " << dmaCopies.size()
+                   << " DMA copies to derived_thread_config\n");
+        for (linalg::CopyOp copyOp : dmaCopies) {
           setLoweringConfig(copyOp,
                             IREE::GPU::DerivedThreadConfigAttr::get(context));
         }
@@ -919,7 +908,8 @@ private:
   /// dimensions.
   std::pair<SmallVector<OpFoldResult>, int64_t>
   computeSubgroupTileSizes(IRRewriter &rewriter, ArrayRef<int64_t> shape,
-                           ArrayRef<int64_t> numWarps) {
+                           ArrayRef<int64_t> numWarps,
+                           int64_t minElementsPerTransfer = 0) {
     SmallVector<OpFoldResult> tileSizes;
     int64_t numTiledDims = 0;
     int64_t rank = shape.size();
@@ -930,6 +920,18 @@ private:
     auto positiveWarps =
         llvm::make_filter_range(numWarps, [](int64_t n) { return n > 0; });
     int64_t totalWarps = llvm::product_of(positiveWarps);
+
+    // Cap total warps to ensure each warp's slice has enough elements for
+    // DMA alignment. Without this, small tensors (e.g., scale operands) get
+    // over-distributed and per-warp slices fall below the minimum transfer.
+    if (minElementsPerTransfer > 0 &&
+        llvm::none_of(shape, ShapedType::isDynamic)) {
+      int64_t totalElements = ShapedType::getNumElements(shape);
+      int64_t maxWarps = totalElements / minElementsPerTransfer;
+      if (maxWarps > 0 && totalWarps > maxWarps) {
+        totalWarps = maxWarps;
+      }
+    }
 
     // Greedily distribute warps to outer dimensions, keeping innermost whole.
     // For 1D tensors, distribute across the single dimension (no inner/outer).
@@ -1090,7 +1092,8 @@ private:
     } else {
       // Compute tile sizes for subgroup-level distribution.
       std::tie(tileSizes, numTiledDims) =
-          computeSubgroupTileSizes(rewriter, shape, numWarps);
+          computeSubgroupTileSizes(rewriter, shape, numWarps,
+                                   minElementsPerTransfer);
     }
 
     if (numTiledDims == 0) {

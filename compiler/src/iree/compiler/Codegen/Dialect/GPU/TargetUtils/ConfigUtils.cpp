@@ -924,26 +924,25 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   // Use global load DMA attribute (subgroup sizes will be derived from
   // translation_info).
   SmallVector<Attribute> promotionArray;
+  Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
   if (useDirectLoad) {
-    Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
     promotionArray = {useGlobalDma, useGlobalDma};
   }
   SmallVector<int64_t> promotionList = {0, 1};
   if (scaled) {
     promotionList.append({2, 3});
-    auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
     // TODO(#23329): Do not swizzle shapes that have no bank conflicts.
     FailureOr<Attribute> lhsSwizzleAttr =
-        getXorShuffleAttr(context, defaultConfigAttr, target, kind,
+        getXorShuffleAttr(context, useGlobalDma, target, kind,
                           schedule->kTileSizes, kMMAOperandLhs);
     FailureOr<Attribute> rhsSwizzleAttr =
-        getXorShuffleAttr(context, defaultConfigAttr, target, kind,
+        getXorShuffleAttr(context, useGlobalDma, target, kind,
                           schedule->kTileSizes, kMMAOperandRhs);
     if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       promotionArray = {};
     } else {
-      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, defaultConfigAttr,
-                        defaultConfigAttr};
+      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, useGlobalDma,
+                        useGlobalDma};
     }
   }
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {
