@@ -188,7 +188,7 @@ static GemmCutoff computeGemmCutoffsForAI(IREE::GPU::TargetAttr target,
   // left to do before any analysis done on tuning data is actionable.
   // See https://github.com/iree-org/iree/issues/22785 for details.
   if (scaled) {
-    return {100.0f, 10000.0f, 70000.0f};
+    return {600.0f, 10000.0f, 70000.0f};
   }
   if (!target.getChip()) {
     LDBG() << "Target chip is not specified, using default gemm cutoffs: "
@@ -274,7 +274,7 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
            /*bestMNTileCountPerSubgroup=*/32,
            /*bestKTileCountPerSubgroup=*/4,
            /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
-               inBitWidth});
+           inBitWidth});
     }
     return GPUMMAHeuristicSeeds(
         {/*bestSubgroupCountPerWorkgroup=*/4,
@@ -288,7 +288,7 @@ getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
           {/*bestSubgroupCountPerWorkgroup=*/8,
            /*bestMNTileCountPerSubgroup=*/32,
            /*bestKTileCountPerSubgroup=*/2,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits /
+           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
                inBitWidth});
     }
     return GPUMMAHeuristicSeeds(
@@ -417,7 +417,7 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
     bytes += scalesBytes;
   }
   int64_t computeIntensity = flops / bytes;
-
+  llvm::errs() << "computeIntensity: " << computeIntensity << "\n";
   if (computeIntensity <= gemmCutoffs.smallGemmCutoff) {
     // For matmuls with small arithmetic intensity, use small
     // bestMNTileCountPerSubgroup and large bestKTileCountPerSubgroup.
