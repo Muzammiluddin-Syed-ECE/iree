@@ -227,7 +227,11 @@ static void resolveHintOp(RewriterBase &rewriter,
       gatherToLDSOps.push_back(gatherToLDSOp);
       continue;
     }
-    // Throw if we can't rewrite all users.
+    // View-like ops (e.g. expand_shape from FlattenSwizzleHintAllocs) are
+    // pass-through: replaceAllUsesWith at the end unwraps the hint for them.
+    if (isa<memref::ExpandShapeOp, memref::CollapseShapeOp>(user)) {
+      continue;
+    }
     hintOp.emitError() << "unsupported SwizzleHintOp user: " << user;
     return;
   }
