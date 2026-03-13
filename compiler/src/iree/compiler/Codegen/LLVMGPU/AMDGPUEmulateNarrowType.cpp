@@ -185,7 +185,6 @@ struct ConvertReinterpretCast final
     return success();
   }
 };
-
 struct AMDGPUEmulateNarrowTypePass final
     : impl::AMDGPUEmulateNarrowTypePassBase<AMDGPUEmulateNarrowTypePass> {
   void getDependentDialects(DialectRegistry &registry) const override {
