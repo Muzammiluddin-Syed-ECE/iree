@@ -7,6 +7,8 @@
 #include "iree/compiler/Codegen/Common/GPU/GPUPatterns.h"
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Common/Transforms.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
@@ -16,6 +18,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Builders.h"
@@ -23,6 +26,7 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/WalkPatternRewriteDriver.h"
+#include <numeric>
 
 namespace mlir::iree_compiler {
 
@@ -31,11 +35,63 @@ namespace mlir::iree_compiler {
 
 namespace {
 
+// Shared memory bank parameters. These are consistent across NVIDIA and AMD
+// GPUs and match the assumptions in GPUReduceBankConflicts/GPUUtils.
+constexpr int64_t kNumBanks = 32;
+constexpr int64_t kBankWidthBytes = 4;
+
+// Returns an XORShuffleAttr if the layout would cause bank conflicts on shared
+// memory, std::nullopt otherwise. Only handles rank-2 layouts.
+static std::optional<IREE::Codegen::XORShuffleAttr>
+computeSwizzleForLayout(MLIRContext *ctx,
+                        IREE::VectorExt::NestedLayoutAttr layout,
+                        Type elementType) {
+  ArrayRef<int64_t> subgroupTile = layout.getSubgroupTile();
+  if (subgroupTile.size() != 2) {
+    return std::nullopt;
+  }
+
+  ArrayRef<int64_t> batchTile = layout.getBatchTile();
+  ArrayRef<int64_t> outerTile = layout.getOuterTile();
+  ArrayRef<int64_t> threadTile = layout.getThreadTile();
+  ArrayRef<int64_t> elementTile = layout.getElementTile();
+
+  int64_t innerDimSize = subgroupTile[1] * batchTile[1] * outerTile[1] *
+                         threadTile[1] * elementTile[1];
+  int64_t accessWidth = elementTile[1];
+
+  unsigned elemBits = elementType.getIntOrFloatBitWidth();
+  unsigned elemBytes = (elemBits + 7) / 8;
+
+  int64_t rowBytes = innerDimSize * elemBytes;
+  int64_t rowStrideBanks = (rowBytes / kBankWidthBytes) % kNumBanks;
+
+  // If stride is 0 every row hits the same banks (worst case).
+  // If gcd(stride, numBanks) == 1, no conflicts.
+  if (rowStrideBanks != 0 && std::gcd(rowStrideBanks, kNumBanks) == 1) {
+    return std::nullopt;
+  }
+
+  // Compute XOR swizzle parameters.
+  int64_t rowWidthElems = kNumBanks * kBankWidthBytes / elemBytes;
+  rowWidthElems = std::min(rowWidthElems, innerDimSize);
+
+  if (accessWidth == 0 || rowWidthElems % accessWidth != 0) {
+    return std::nullopt;
+  }
+
+  return IREE::Codegen::XORShuffleAttr::get(ctx, rowWidthElems, accessWidth,
+                                            /*row_stride=*/int64_t(0),
+                                            /*per_phase=*/int64_t(0));
+}
+
 // Allocates a tensor to copy the vector into a la bufferization.alloc_tensor.
 // This allocation is always static as vectors are currently always static
-// where this is used.
-static FailureOr<Value> allocateTensorForVector(OpBuilder &b, Location loc,
-                                                Value vector) {
+// where this is used. When |swizzle| is provided, wraps the allocation with
+// a SwizzleHintOp using the flat-1D + expand_shape pattern.
+static FailureOr<Value>
+allocateTensorForVector(OpBuilder &b, Location loc, Value vector,
+                        std::optional<IREE::Codegen::XORShuffleAttr> swizzle) {
   VectorType vectorType = cast<VectorType>(vector.getType());
   if (vectorType.isScalable()) {
     return failure();
@@ -47,17 +103,35 @@ static FailureOr<Value> allocateTensorForVector(OpBuilder &b, Location loc,
   RankedTensorType tensorType =
       RankedTensorType::get(vectorType.getShape(), vectorType.getElementType(),
                             sharedMemoryAddrSpace);
-  // Vectors are always statically shaped.
-  auto allocTensorOp = bufferization::AllocTensorOp::create(
-      b, loc, tensorType, ValueRange{}, Value());
-  allocTensorOp.setMemorySpaceAttr(sharedMemoryAddrSpace);
+
+  Value dest;
+  if (swizzle) {
+    // Allocate a flat 1D tensor, attach swizzle hint, then expand back.
+    int64_t numElements = tensorType.getNumElements();
+    RankedTensorType flatType = RankedTensorType::get(
+        {numElements}, tensorType.getElementType(), sharedMemoryAddrSpace);
+    auto allocTensorOp = bufferization::AllocTensorOp::create(
+        b, loc, flatType, ValueRange{}, Value());
+    allocTensorOp.setMemorySpaceAttr(sharedMemoryAddrSpace);
+
+    Value swizzled =
+        IREE::Codegen::SwizzleHintOp::create(b, loc, allocTensorOp, *swizzle);
+    dest = tensor::ExpandShapeOp::create(
+        b, loc, tensorType, swizzled,
+        {llvm::to_vector(llvm::seq(tensorType.getRank()))});
+  } else {
+    auto allocTensorOp = bufferization::AllocTensorOp::create(
+        b, loc, tensorType, ValueRange{}, Value());
+    allocTensorOp.setMemorySpaceAttr(sharedMemoryAddrSpace);
+    dest = allocTensorOp;
+  }
 
   Value c0 = arith::ConstantIndexOp::create(b, loc, 0);
   SmallVector<Value> indices(vectorType.getRank(), c0);
   SmallVector<bool> inBounds(vectorType.getRank(), true);
-  Value copied = vector::TransferWriteOp::create(b, loc, vector, allocTensorOp,
-                                                 indices, inBounds)
-                     .getResult();
+  Value copied =
+      vector::TransferWriteOp::create(b, loc, vector, dest, indices, inBounds)
+          .getResult();
   return copied;
 }
 
@@ -96,10 +170,18 @@ materializeSharedMemoryConversions(FunctionOpInterface funcOp) {
 
     builder.setInsertionPoint(op);
     OpOperand &operand = op.getInputMutable();
-    // TODO: Since we know the read/write layout for this memory, we can get
-    // optimal swizzling here. Figure out how to do that.
+
+    // Detect bank conflicts from the layout and compute a swizzle if needed.
+    std::optional<IREE::Codegen::XORShuffleAttr> swizzle;
+    VectorType vecTy = cast<VectorType>(op.getType());
+    if (auto nestedLayout =
+            dyn_cast<IREE::VectorExt::NestedLayoutAttr>(op.getLayout())) {
+      swizzle = computeSwizzleForLayout(op.getContext(), nestedLayout,
+                                        vecTy.getElementType());
+    }
+
     FailureOr<Value> ret =
-        allocateTensorForVector(builder, op->getLoc(), operand.get());
+        allocateTensorForVector(builder, op->getLoc(), operand.get(), swizzle);
     if (failed(ret)) {
       return failure();
     }
