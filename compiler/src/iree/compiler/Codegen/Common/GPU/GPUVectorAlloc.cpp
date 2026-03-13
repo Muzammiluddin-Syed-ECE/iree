@@ -26,7 +26,6 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/WalkPatternRewriteDriver.h"
-#include <numeric>
 
 namespace mlir::iree_compiler {
 
@@ -35,17 +34,12 @@ namespace mlir::iree_compiler {
 
 namespace {
 
-// Shared memory bank parameters. These are consistent across NVIDIA and AMD
-// GPUs and match the assumptions in GPUReduceBankConflicts/GPUUtils.
-constexpr int64_t kNumBanks = 32;
-constexpr int64_t kBankWidthBytes = 4;
-
 // Returns an XORShuffleAttr if the layout would cause bank conflicts on shared
 // memory, std::nullopt otherwise. Only handles rank-2 layouts.
 static std::optional<IREE::Codegen::XORShuffleAttr>
 computeSwizzleForLayout(MLIRContext *ctx,
                         IREE::VectorExt::NestedLayoutAttr layout,
-                        Type elementType) {
+                        Type elementType, int64_t numBanks) {
   ArrayRef<int64_t> subgroupTile = layout.getSubgroupTile();
   if (subgroupTile.size() != 2) {
     return std::nullopt;
@@ -59,21 +53,19 @@ computeSwizzleForLayout(MLIRContext *ctx,
   int64_t innerDimSize = subgroupTile[1] * batchTile[1] * outerTile[1] *
                          threadTile[1] * elementTile[1];
   int64_t accessWidth = elementTile[1];
-
-  unsigned elemBits = elementType.getIntOrFloatBitWidth();
-  unsigned elemBytes = (elemBits + 7) / 8;
+  int64_t elemBytes = (elementType.getIntOrFloatBitWidth() + 7) / 8;
 
   int64_t rowBytes = innerDimSize * elemBytes;
-  int64_t rowStrideBanks = (rowBytes / kBankWidthBytes) % kNumBanks;
+  int64_t rowStrideBanks = (rowBytes / kSharedMemoryBankWidthBytes) % numBanks;
 
   // If stride is 0 every row hits the same banks (worst case).
   // If gcd(stride, numBanks) == 1, no conflicts.
-  if (rowStrideBanks != 0 && std::gcd(rowStrideBanks, kNumBanks) == 1) {
+  if (rowStrideBanks != 0 && std::gcd(rowStrideBanks, numBanks) == 1) {
     return std::nullopt;
   }
 
   // Compute XOR swizzle parameters.
-  int64_t rowWidthElems = kNumBanks * kBankWidthBytes / elemBytes;
+  int64_t rowWidthElems = numBanks * kSharedMemoryBankWidthBytes / elemBytes;
   rowWidthElems = std::min(rowWidthElems, innerDimSize);
 
   if (accessWidth == 0 || rowWidthElems % accessWidth != 0) {
@@ -176,8 +168,14 @@ materializeSharedMemoryConversions(FunctionOpInterface funcOp) {
     VectorType vecTy = cast<VectorType>(op.getType());
     if (auto nestedLayout =
             dyn_cast<IREE::VectorExt::NestedLayoutAttr>(op.getLayout())) {
+      int64_t numBanks = 32;
+      if (IREE::GPU::TargetAttr target = getGPUTargetAttr(op)) {
+        if (auto bc = target.getWgp().getWorkgroupMemoryBankCount()) {
+          numBanks = *bc;
+        }
+      }
       swizzle = computeSwizzleForLayout(op.getContext(), nestedLayout,
-                                        vecTy.getElementType());
+                                        vecTy.getElementType(), numBanks);
     }
 
     FailureOr<Value> ret =
