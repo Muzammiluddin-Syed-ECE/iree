@@ -615,6 +615,9 @@ void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
   }
 
   funcPassManager.addPass(createIREECodegenFoldMemRefAliasOpsPass());
+  if (forROCDL) {
+    // funcPassManager.addPass(createAMDGPUCoalesceScaleReadsPass());
+  }
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
   {
