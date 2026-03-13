@@ -332,7 +332,15 @@ struct ConvertToROCDLPass final
       vector::populateVectorTransposeLoweringPatterns(
           patterns, options.vectorTransposeLowering);
       vector::populateVectorTransferLoweringPatterns(patterns);
-      arith::populateExpandBFloat16Patterns(patterns);
+      // gfx940+ and gfx12+ have native bf16 conversion (v_cvt_pk_bf16_f32).
+      // Let arith.truncf lower to fptrunc so the LLVM backend can use it.
+      bool hasBF16ConversionInsts =
+          (maybeChipset->majorVersion == 9 &&
+           maybeChipset->minorVersion >= 0x4) ||
+          maybeChipset->majorVersion >= 12;
+      if (!hasBF16ConversionInsts) {
+        arith::populateExpandBFloat16Patterns(patterns);
+      }
       if (failed(applyPatternsGreedily(m, std::move(patterns), config))) {
         return signalPassFailure();
       }
