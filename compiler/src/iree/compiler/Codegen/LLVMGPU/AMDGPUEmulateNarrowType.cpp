@@ -154,6 +154,38 @@ struct ConvertGatherToLDS final : ConversionPattern {
   }
 };
 
+struct ConvertReinterpretCast final
+    : OpConversionPattern<memref::ReinterpretCastOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(memref::ReinterpretCastOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    MemRefType oldType = op.getType();
+    if (oldType.getRank() <= 1)
+      return failure();
+
+    unsigned oldBits = oldType.getElementTypeBitWidth();
+    if (oldBits >= 8)
+      return failure();
+
+    MemRefType newTy =
+        getTypeConverter()->convertType<MemRefType>(oldType);
+    if (!newTy)
+      return failure();
+
+    int64_t packFactor = newTy.getElementTypeBitWidth() / oldBits;
+    int64_t totalOldElements = ShapedType::getNumElements(oldType.getShape());
+    int64_t newSize = llvm::divideCeilSigned(totalOldElements, packFactor);
+
+    rewriter.replaceOpWithNewOp<memref::ReinterpretCastOp>(
+        op, newTy, adaptor.getSource(), /*offset=*/int64_t(0),
+        /*sizes=*/SmallVector<int64_t>{newSize},
+        /*strides=*/SmallVector<int64_t>{1});
+    return success();
+  }
+};
+
 struct AMDGPUEmulateNarrowTypePass final
     : impl::AMDGPUEmulateNarrowTypePassBase<AMDGPUEmulateNarrowTypePass> {
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -175,6 +207,8 @@ struct AMDGPUEmulateNarrowTypePass final
                                              patterns.getContext());
           patterns.add<ConvertGatherToLDS>(typeConverter,
                                            patterns.getContext());
+          patterns.add<ConvertReinterpretCast>(typeConverter,
+                                               patterns.getContext());
         };
     if (failed(emulateNarrowType(getOperation(), /*disableAtomic=*/true,
                                  populateAMDGPUPatterns))) {
