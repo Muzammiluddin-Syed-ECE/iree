@@ -956,17 +956,14 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   SmallVector<Attribute> promotionArray = {useGlobalDma, useGlobalDma};
   SmallVector<int64_t> promotionList = {0, 1};
   if (scaled) {
-    // TODO(#22119): We don't use global load DMA for scaled matmuls, because
-    // compilation doesn't support it. Once this is fixed, we should use global
-    // load DMA here when possible.
     promotionList.append({2, 3});
     auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
     // TODO(#23329): Do not swizzle shapes that have no bank conflicts.
     FailureOr<Attribute> lhsSwizzleAttr =
-        getXorShuffleAttr(context, defaultConfigAttr, target, kind,
+        getXorShuffleAttr(context, useGlobalDma, target, kind,
                           schedule->kTileSizes, kMMAOperandLhs);
     FailureOr<Attribute> rhsSwizzleAttr =
-        getXorShuffleAttr(context, defaultConfigAttr, target, kind,
+        getXorShuffleAttr(context, useGlobalDma, target, kind,
                           schedule->kTileSizes, kMMAOperandRhs);
     if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       promotionArray = {};

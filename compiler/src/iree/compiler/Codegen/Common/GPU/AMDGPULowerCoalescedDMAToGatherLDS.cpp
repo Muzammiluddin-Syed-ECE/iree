@@ -9,6 +9,7 @@
 #include <optional>
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
@@ -223,6 +224,32 @@ struct LowerCoalescedGatherDMAPattern final
     Value source = dmaOp.getSource();
     Value dest = dmaOp.getInit();
 
+    // Detect swizzle_hint on destination (LDS) by tracing through view-like
+    // ops (subview, cast). When present, we invert the swizzle onto the global
+    // source reads so that data arriving at linear LDS positions matches the
+    // swizzled layout the compute phase expects.
+    IREE::Codegen::SwizzleAttrInterface destSwizzle;
+    {
+      Value traceVal = dest;
+      while (traceVal) {
+        if (auto hint =
+                traceVal.getDefiningOp<IREE::Codegen::SwizzleHintOp>()) {
+          destSwizzle = hint.getSwizzle();
+          LDBG() << "  Destination has swizzle hint: " << destSwizzle;
+          break;
+        }
+        if (auto sv = traceVal.getDefiningOp<memref::SubViewOp>()) {
+          traceVal = sv.getSource();
+          continue;
+        }
+        if (auto castOp = traceVal.getDefiningOp<memref::CastOp>()) {
+          traceVal = castOp.getSource();
+          continue;
+        }
+        break;
+      }
+    }
+
     auto sourceType = cast<MemRefType>(source.getType());
     auto destType = cast<MemRefType>(dest.getType());
 
@@ -320,7 +347,7 @@ struct LowerCoalescedGatherDMAPattern final
 
     emitTransfers(rewriter, loc, source, dest, destShape, numLinearDims,
                   elementType, indices, segments, segmentLaneOffsets,
-                  dmaOp.getInBounds());
+                  dmaOp.getInBounds(), destSwizzle);
 
     rewriter.eraseOp(dmaOp);
     return success();
@@ -349,12 +376,12 @@ private:
   ///   - Lane 16: srcLinearOffset = 0 + 16*4 = 64
   ///   - delinearize(64, [16, 64]) → [1, 0] (for source)
   ///   - delinearize(0, [16, 64])  → [0, 0] (for destination, uniform)
-  void emitTransfers(PatternRewriter &rewriter, Location loc, Value source,
-                     Value dest, ArrayRef<int64_t> destShape,
-                     int64_t numLinearDims, Type elementType,
-                     OperandRange indices, ArrayRef<TransferSegment> segments,
-                     ArrayRef<Value> segmentLaneOffsets,
-                     std::optional<ArrayAttr> inBoundsAttr) const {
+  void emitTransfers(
+      PatternRewriter &rewriter, Location loc, Value source, Value dest,
+      ArrayRef<int64_t> destShape, int64_t numLinearDims, Type elementType,
+      OperandRange indices, ArrayRef<TransferSegment> segments,
+      ArrayRef<Value> segmentLaneOffsets, std::optional<ArrayAttr> inBoundsAttr,
+      IREE::Codegen::SwizzleAttrInterface destSwizzle = {}) const {
     int64_t destRank = destShape.size();
     int64_t numOuterDims = destRank - numLinearDims;
     LDBG() << "Emitting transfers: " << numOuterDims << " outer dims, "
@@ -401,6 +428,17 @@ private:
           // Source indices: add lane offset before delinearization (divergent).
           Value srcLinearOffset =
               arith::AddIOp::create(rewriter, loc, linearOffsetVal, laneOffset);
+
+          // When destination has a swizzle_hint, invert the swizzle onto the
+          // source read pattern. XOR is self-inverse: f(f(x)) = x. Reading
+          // from global[f(pos)] means LDS[pos] = data[f(pos)], and the compute
+          // phase reading LDS[f(i)] gets data[f(f(i))] = data[i].
+          if (destSwizzle) {
+            srcLinearOffset = getValueOrCreateConstantIndexOp(
+                rewriter, loc,
+                destSwizzle.swizzleOffset(rewriter, loc, srcLinearOffset, dest));
+          }
+
           auto srcDelinearize = affine::AffineDelinearizeIndexOp::create(
               rewriter, loc, srcLinearOffset, basis, /*hasOuterBound=*/true);
 
