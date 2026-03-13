@@ -877,7 +877,8 @@ private:
   /// dimensions.
   std::pair<SmallVector<OpFoldResult>, int64_t>
   computeSubgroupTileSizes(IRRewriter &rewriter, ArrayRef<int64_t> shape,
-                           ArrayRef<int64_t> numWarps) {
+                           ArrayRef<int64_t> numWarps,
+                           int64_t minElementsPerTransfer = 0) {
     SmallVector<OpFoldResult> tileSizes;
     int64_t numTiledDims = 0;
     int64_t rank = shape.size();
@@ -888,6 +889,18 @@ private:
     auto positiveWarps =
         llvm::make_filter_range(numWarps, [](int64_t n) { return n > 0; });
     int64_t totalWarps = llvm::product_of(positiveWarps);
+
+    // Cap total warps to ensure each warp's slice has enough elements for
+    // DMA alignment. Without this, small tensors (e.g., scale operands) get
+    // over-distributed and per-warp slices fall below the minimum transfer.
+    if (minElementsPerTransfer > 0 &&
+        llvm::none_of(shape, ShapedType::isDynamic)) {
+      int64_t totalElements = ShapedType::getNumElements(shape);
+      int64_t maxWarps = totalElements / minElementsPerTransfer;
+      if (maxWarps > 0 && totalWarps > maxWarps) {
+        totalWarps = maxWarps;
+      }
+    }
 
     // Greedily distribute warps to outer dimensions, keeping innermost whole.
     // For 1D tensors, distribute across the single dimension (no inner/outer).
@@ -1049,7 +1062,8 @@ private:
     } else {
       // Compute tile sizes for subgroup-level distribution.
       std::tie(tileSizes, numTiledDims) =
-          computeSubgroupTileSizes(rewriter, shape, numWarps);
+          computeSubgroupTileSizes(rewriter, shape, numWarps,
+                                   minElementsPerTransfer);
     }
 
     if (numTiledDims == 0) {

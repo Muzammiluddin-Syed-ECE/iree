@@ -98,16 +98,21 @@ static bool hasDirectGatherToLDS(scf::ForOp forOp) {
 }
 
 /// Checks if a loop contains gather_to_lds operations nested inside regions
-/// (e.g., inside scf.if). Such conditional async copies can't be reliably
-/// pipelined.
+/// that prevent reliable pipelining (e.g., inside scf.for or other loops).
+/// gather_to_lds inside scf.if is allowed because the condition is typically
+/// loop-invariant (e.g., thread_id < N), and the scf.if can be treated as
+/// a load unit during pipelining.
 static bool hasNestedGatherToLDS(scf::ForOp forOp) {
   for (Operation &op : forOp.getBody()->getOperations()) {
-    if (op.getNumRegions() > 0) {
-      bool hasNested = false;
-      op.walk([&](amdgpu::GatherToLDSOp) { hasNested = true; });
-      if (hasNested) {
-        return true;
-      }
+    if (op.getNumRegions() == 0)
+      continue;
+    // Allow scf.if — conditional DMA with loop-invariant guards is safe.
+    if (isa<scf::IfOp>(op))
+      continue;
+    bool hasNested = false;
+    op.walk([&](amdgpu::GatherToLDSOp) { hasNested = true; });
+    if (hasNested) {
+      return true;
     }
   }
   return false;
@@ -403,6 +408,16 @@ static LogicalResult identifyRootOperations(
       if (isa<amdgpu::GatherToLDSOp>(op)) {
         loadRoots.push_back(&op);
         LDBG() << "  Load root: " << op;
+      } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+        // scf.if containing gather_to_lds: treat the entire scf.if as a load
+        // root. This handles cases where only a subset of wavefronts
+        // participate in DMA (e.g., scale operands with fewer warps).
+        bool containsGather = false;
+        ifOp->walk([&](amdgpu::GatherToLDSOp) { containsGather = true; });
+        if (containsGather) {
+          loadRoots.push_back(&op);
+          LDBG() << "  Load root (scf.if with gather_to_lds): " << op;
+        }
       } else if (isa<scf::YieldOp>(op)) {
         computeRoots.push_back(&op);
         LDBG() << "  Compute root: " << op;
@@ -472,6 +487,20 @@ static LogicalResult computeBackwardSlice(ArrayRef<Operation *> roots,
     // getBackwardSlice doesn't include the root itself, so add it explicitly
     slice.insert(root);
     slice.insert_range(rootSlice);
+
+    // If the root itself is a scf.if, compute backward slices of all nested
+    // operations to capture dependencies like multi-buffered LDS subviews.
+    // getBackwardSlice on a scf.if only captures the condition operand, not
+    // dependencies of operations inside the if's regions.
+    if (auto ifOp = dyn_cast<scf::IfOp>(root)) {
+      ifOp.getOperation()->walk([&](Operation *nestedOp) {
+        if (nestedOp != ifOp.getOperation()) {
+          SetVector<Operation *> nestedSlice;
+          (void)getBackwardSlice(nestedOp, &nestedSlice, options);
+          slice.insert_range(nestedSlice);
+        }
+      });
+    }
 
     // Also add any parent scf.if operations that contain this root
     // This is necessary because roots inside scf.if need the if to be scheduled
@@ -1058,13 +1087,22 @@ static Operation *findFirstSharedRead(Block::iterator begin,
   return nullptr;
 }
 
-/// Find the last gather_to_lds operation in a block range.
+/// Check if an operation is or contains a gather_to_lds operation.
+static bool isOrContainsGatherToLDS(Operation *op) {
+  if (isa<amdgpu::GatherToLDSOp>(op))
+    return true;
+  return op->walk([](amdgpu::GatherToLDSOp) { return WalkResult::interrupt(); })
+      .wasInterrupted();
+}
+
+/// Find the last operation in a block range that is or contains gather_to_lds.
+/// This handles both direct gather_to_lds ops and scf.if blocks that wrap them.
 static Operation *findLastGatherToLDS(Block::iterator begin,
                                       Block::iterator end) {
   auto rbegin = std::make_reverse_iterator(end);
   auto rend = std::make_reverse_iterator(begin);
   for (auto it = rbegin; it != rend; ++it) {
-    if (isa<amdgpu::GatherToLDSOp>(&*it)) {
+    if (isOrContainsGatherToLDS(&*it)) {
       return &*it;
     }
   }
@@ -1089,7 +1127,7 @@ static void insertPrologueAsyncMarks(RewriterBase &rewriter, Location loc,
                                      unsigned numStages) {
   SmallVector<Operation *> prologueGathers;
   for (auto it = parentBlock->begin(); it != loopStart; ++it) {
-    if (isa<amdgpu::GatherToLDSOp>(&*it)) {
+    if (isOrContainsGatherToLDS(&*it)) {
       prologueGathers.push_back(&*it);
     }
   }
