@@ -1855,20 +1855,23 @@ reindexScaleCoordsAffine(OpBuilder &builder, Location loc, Value mIdx,
 }
 
 // Given a scale input value and repeat factors, walk up the use-def chain to
-// find the LDS transfer_read, compute the original flat (m, k) position by
-// combining transfer_read indices with extract offsets, apply the reindex
-// formula, and create a new scalar read from the flat 2D LDS memref.
+// find the LDS transfer_read, compute the group's base address in the
+// preshuffled LDS, emit a wide vector read of numRepeats elements, and
+// extract the element corresponding to this intrinsic's T_index.
 //
 // The chain looks like:
 //   transfer_read %expanded_lds[d0, d1, d2, d3] → vector<AxBxCxDxf8>
-//   extract_strided_slice offsets=[i0, 0, i2, 0] → vector<1x1x1x1xf8>
+//   vector.extract [i0, i2, ...] → vector<1x1xf8>
 //   shape_cast → vector<1xf8>
 //
-// The flat position is:
-//   m = (d0 + i0) * innerM + d1
-//   k = (d2 + i2) * innerK + d3
+// The extractOffsets [i0, _, i2, _] identify which intrinsic tile this is
+// (T_m = i0, T_k = i2). The readIndices [d0, d1, d2, d3] are the thread's
+// position (same for all intrinsics in the subgroup).
 //
-// After reindexing, we read from the flat LDS memref at (m', k').
+// For a contiguous group of numRepeats = R_m * R_k intrinsics, the
+// preshuffled layout places their scale bytes at consecutive flat addresses.
+// We compute the group's base address from readIndices only (not
+// extractOffsets), so CSE can merge the wide reads across intrinsics.
 static Value reindexScaleRead(OpBuilder &builder, Location loc, Value scaleVal,
                               int64_t intrinsicM, int64_t intrinsicK,
                               int64_t repeatM, int64_t repeatK) {
@@ -1888,63 +1891,106 @@ static Value reindexScaleRead(OpBuilder &builder, Location loc, Value scaleVal,
     return scaleVal;
 
   // Get the inner dimension sizes from the expand_shape output.
-  // expand_shape [[0,1], [2,3]] takes memref<MxK> → memref<M/S1 x S1 x K/S3 x S3>
-  // so S1 and S3 are the inner sizes for linearization.
+  // expand_shape [[0,1], [2,3]]: memref<MxK> → memref<D0 x D1 x D2 x D3>
+  // D1 = innerM (intrinsicM), D3 = innerK (intrinsicK).
   ArrayRef<int64_t> expandedShape =
       cast<MemRefType>(expandOp.getResultType()).getShape();
   if (expandedShape.size() != 4)
     return scaleVal;
-  int64_t innerM = expandedShape[1]; // e.g. 16
-  int64_t innerK = expandedShape[3]; // e.g. 4
+  int64_t innerM = expandedShape[1];
+  int64_t innerK = expandedShape[3];
 
   SmallVector<Value> readIndices(readOp.getIndices());
   if (readIndices.size() != 4)
     return scaleVal;
 
+  int64_t numRepeats = repeatM * repeatK;
+  int64_t kLds = flatType.getShape()[1];
+  int64_t mLds = flatType.getShape()[0];
+
+  // Determine this intrinsic's position within the repeat group.
+  // extractOffsets[0] = T_m (outer M tile index), extractOffsets[2] = T_k.
+  int64_t T_m = extractOffsets[0];
+  int64_t T_k = extractOffsets[2];
+  int64_t groupM = T_m - T_m % repeatM;
+  int64_t groupK = T_k - T_k % repeatK;
+  int64_t tIndexInGroup = (T_m - groupM) * repeatK + (T_k - groupK);
+
+  // Compute the group's base flat (m, k) using only readIndices + group base.
+  // This is thread-invariant across intrinsics in the same group, so CSE
+  // will merge the wide reads.
+  //
+  // baseFlatM = (readIndices[0] + groupM) * innerM + readIndices[1]
+  // baseFlatK = (readIndices[2] + groupK) * innerK + readIndices[3]
   auto cst = [&](int64_t v) -> Value {
     return arith::ConstantIndexOp::create(builder, loc, v);
   };
 
-  // Compute full 4D position: readIndices + extractOffsets.
-  // d0_full = readIndices[0] + extractOffsets[0]
-  // d1_full = readIndices[1] + extractOffsets[1]  (extractOffsets[1] is 0)
-  // d2_full = readIndices[2] + extractOffsets[2]
-  // d3_full = readIndices[3] + extractOffsets[3]  (extractOffsets[3] is 0)
-  SmallVector<Value> fullIndices(4);
-  for (int i = 0; i < 4; ++i) {
-    if (extractOffsets[i] != 0) {
-      fullIndices[i] = arith::AddIOp::create(builder, loc, readIndices[i],
-                                             cst(extractOffsets[i]));
-    } else {
-      fullIndices[i] = readIndices[i];
-    }
+  Value baseFlatM, baseFlatK;
+  if (groupM != 0) {
+    Value baseD0 = arith::AddIOp::create(builder, loc, readIndices[0],
+                                         cst(groupM));
+    baseFlatM = arith::AddIOp::create(
+        builder, loc, arith::MulIOp::create(builder, loc, baseD0, cst(innerM)),
+        readIndices[1]);
+  } else {
+    baseFlatM = arith::AddIOp::create(
+        builder, loc,
+        arith::MulIOp::create(builder, loc, readIndices[0], cst(innerM)),
+        readIndices[1]);
+  }
+  if (groupK != 0) {
+    Value baseD2 = arith::AddIOp::create(builder, loc, readIndices[2],
+                                         cst(groupK));
+    baseFlatK = arith::AddIOp::create(
+        builder, loc, arith::MulIOp::create(builder, loc, baseD2, cst(innerK)),
+        readIndices[3]);
+  } else {
+    baseFlatK = arith::AddIOp::create(
+        builder, loc,
+        arith::MulIOp::create(builder, loc, readIndices[2], cst(innerK)),
+        readIndices[3]);
   }
 
-  // Linearize to 2D: m = d0_full * innerM + d1_full, k = d2_full * innerK +
-  // d3_full.
-  Value flatM = arith::AddIOp::create(
-      builder, loc,
-      arith::MulIOp::create(builder, loc, fullIndices[0], cst(innerM)),
-      fullIndices[1]);
-  Value flatK = arith::AddIOp::create(
-      builder, loc,
-      arith::MulIOp::create(builder, loc, fullIndices[2], cst(innerK)),
-      fullIndices[3]);
+  // Reindex the group base to get (m'_base, k'_base) in the preshuffled LDS.
+  auto [mPrimeBase, kPrimeBase] = reindexScaleCoordsAffine(
+      builder, loc, baseFlatM, baseFlatK, intrinsicM, intrinsicK, repeatM,
+      repeatK);
 
-  // Apply the reindex formula using affine maps for better downstream
-  // simplification (constants fold into the map, enabling contiguity proofs).
-  auto [mPrime, kPrime] = reindexScaleCoordsAffine(builder, loc, flatM, flatK,
-                                                   intrinsicM, intrinsicK,
-                                                   repeatM, repeatK);
+  // Linearize to a flat byte offset: base_flat = m'_base * kLds + k'_base
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr d0, d1;
+  bindDims(ctx, d0, d1);
+  AffineMap linearizeMap =
+      AffineMap::get(2, 0, d0 * kLds + d1, ctx);
+  Value baseFlatAddr = affine::AffineApplyOp::create(
+      builder, loc, linearizeMap, ValueRange{mPrimeBase, kPrimeBase});
 
-  // Create a new scalar read from the flat 2D LDS memref.
+  // Create a 1D view of the LDS memref for the wide read.
   FloatType f8E8M0 = builder.getF8E8M0Type();
-  VectorType scalarVecType = VectorType::get({1}, f8E8M0);
-  SmallVector<bool> inBounds = {true};
-  auto newRead = vector::TransferReadOp::create(
-      builder, loc, scalarVecType, flatMemref, ValueRange{mPrime, kPrime},
+  int64_t totalElems = mLds * kLds;
+  auto flat1DType = MemRefType::get({totalElems}, f8E8M0,
+                                    MemRefLayoutAttrInterface{},
+                                    flatType.getMemorySpace());
+  Value flat1D = memref::ReinterpretCastOp::create(
+      builder, loc, flat1DType, flatMemref,
+      /*offsets=*/ValueRange{}, /*sizes=*/ValueRange{},
+      /*strides=*/ValueRange{},
+      /*static_offsets=*/ArrayRef<int64_t>{0},
+      /*static_sizes=*/ArrayRef<int64_t>{totalElems},
+      /*static_strides=*/ArrayRef<int64_t>{1});
+
+  // Read a contiguous vector of numRepeats scale bytes.
+  VectorType wideVecType = VectorType::get({numRepeats}, f8E8M0);
+  auto wideRead = vector::TransferReadOp::create(
+      builder, loc, wideVecType, flat1D, ValueRange{baseFlatAddr},
       readOp.getPadding(), ArrayRef<bool>{true});
-  return newRead.getResult();
+
+  // Extract this intrinsic's element at the static T_index position.
+  Value element =
+      vector::ExtractOp::create(builder, loc, wideRead, tIndexInGroup);
+  VectorType scalarVecType = VectorType::get({1}, f8E8M0);
+  return vector::BroadcastOp::create(builder, loc, scalarVecType, element);
 }
 
 LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
