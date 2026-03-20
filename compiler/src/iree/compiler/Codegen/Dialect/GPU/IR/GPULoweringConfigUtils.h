@@ -62,6 +62,17 @@ IREE::GPU::LoweringConfigAttr setPromotedOperandsList(
 std::optional<SmallVector<int64_t>> getPaddingList(LoweringConfigAttr config,
                                                    bool paddingConv = false);
 
+/// Helper to retrieve scale repeats [R_m, R_k] from lowering config.
+std::optional<SmallVector<int64_t>>
+getScaleRepeats(LoweringConfigAttr config);
+/// Append scale repeats to the attrs list.
+void appendScaleRepeats(MLIRContext *context,
+                        SmallVectorImpl<NamedAttribute> &attrs,
+                        ArrayRef<int64_t> repeats);
+
+/// Helper to retrieve dimension expansion config from lowering config.
+DimensionExpansionAttr getDimensionExpansion(LoweringConfigAttr config);
+
 /// Helper to check if the lowering config indicates acc gemm should be
 /// converted.
 bool shouldConvertAccGemm(LoweringConfigAttr config);
