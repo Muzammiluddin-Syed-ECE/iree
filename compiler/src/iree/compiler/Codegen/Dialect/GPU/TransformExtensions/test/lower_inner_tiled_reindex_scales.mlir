@@ -76,15 +76,17 @@ module attributes { transform.with_named_sequence } {
 //  CHECK-SAME:   %[[LDS_LHS_SCALE:[A-Za-z0-9]+]]: memref<256x8xf8E8M0FNU, #gpu.address_space<workgroup>>
 //  CHECK-SAME:   %[[LDS_RHS_SCALE:[A-Za-z0-9]+]]: memref<256x8xf8E8M0FNU, #gpu.address_space<workgroup>>
 //
-//       The reindexed read goes to the flat 2D LDS memref at [43, 1].
-//   CHECK-DAG:   %[[C43:.+]] = arith.constant 43 : index
-//   CHECK-DAG:   %[[C1:.+]] = arith.constant 1 : index
-//       CHECK:   %[[REINDEXED:.+]] = vector.transfer_read %[[LDS_LHS_SCALE]][%[[C43]], %[[C1]]]
+//       Wide read: reinterpret_cast to 1D, read vector<4> from flat base, extract element.
+//       For constant indices [2, 5, 1, 2] with repeats=[2,2], the flat base is 345.
+//   CHECK-DAG:   %[[C345:.+]] = arith.constant 345 : index
+//       CHECK:   %[[FLAT1D:.+]] = memref.reinterpret_cast %[[LDS_LHS_SCALE]]
 //  CHECK-SAME:     memref<256x8xf8E8M0FNU, #gpu.address_space<workgroup>>
-//  CHECK-SAME:     vector<1xf8E8M0FNU>
-//       CHECK:   %[[SCALE_BYTE:.+]] = vector.extract %[[REINDEXED]][0]
-//       CHECK:   %[[PADDED:.+]] = vector.insert %[[SCALE_BYTE]], %{{.+}} [0]
-//       CHECK:   amdgpu.scaled_mfma 16x16x128 (%[[PADDED]][0] * %[[LHS]])
+//  CHECK-SAME:     memref<2048xf8E8M0FNU, #gpu.address_space<workgroup>>
+//       CHECK:   %[[WIDE:.+]] = vector.transfer_read %[[FLAT1D]][%[[C345]]]
+//  CHECK-SAME:     vector<4xf8E8M0FNU>
+//       CHECK:   %[[ELEM:.+]] = vector.extract %[[WIDE]][0]
+//       CHECK:   vector.insert %[[ELEM]], %{{.+}} [0]
+//       CHECK:   amdgpu.scaled_mfma 16x16x128
 
 // -----
 
@@ -153,25 +155,13 @@ module attributes { transform.with_named_sequence } {
 //  CHECK-SAME:   %[[LDS_LHS:[A-Za-z0-9]+]]: memref<256x8xf8E8M0FNU, #gpu.address_space<workgroup>>
 //  CHECK-SAME:   %[[OUTER_M:[A-Za-z0-9]+]]: index, %[[THREAD_M:[A-Za-z0-9]+]]: index, %[[THREAD_KB:[A-Za-z0-9]+]]: index
 //
-//       All constants defined up-front.
-//   CHECK-DAG:   %[[C2:.+]] = arith.constant 2 : index
-//   CHECK-DAG:   %[[C4:.+]] = arith.constant 4 : index
-//   CHECK-DAG:   %[[C16:.+]] = arith.constant 16 : index
-//
-//       Linearize m = outer_m * 16 + thread_m
-//       CHECK:   %[[FLAT_M_PART:.+]] = arith.muli %[[OUTER_M]], %[[C16]]
-//       CHECK:   %[[FLAT_M:.+]] = arith.addi %[[FLAT_M_PART]], %[[THREAD_M]]
-//
-//       Reindex formula: divs and mods for T_m, T_k, IntrinsicM, IntrinsicK
-//       CHECK:   arith.divui %[[FLAT_M]], %[[C16]]
-//       CHECK:   arith.divui %[[THREAD_KB]], %[[C4]]
-//       CHECK:   arith.remui %[[FLAT_M]], %[[C16]]
-//       CHECK:   arith.remui %[[THREAD_KB]], %[[C4]]
-//
-//       The reindexed read comes from the flat 2D LDS memref, not the expanded 4D one.
-//       CHECK:   vector.transfer_read %[[LDS_LHS]][%{{.+}}, %{{.+}}]
-//  CHECK-SAME:     memref<256x8xf8E8M0FNU, #gpu.address_space<workgroup>>
-//  CHECK-SAME:     vector<1xf8E8M0FNU>
+//       Wide read: reinterpret_cast to 1D memref, compute base via affine maps, read vector<4>.
+//       CHECK:   %[[FLAT1D:.+]] = memref.reinterpret_cast %[[LDS_LHS]]
+//  CHECK-SAME:     memref<2048xf8E8M0FNU, #gpu.address_space<workgroup>>
+//       CHECK:   %[[WIDE:.+]] = vector.transfer_read %[[FLAT1D]][%{{.+}}]
+//  CHECK-SAME:     vector<4xf8E8M0FNU>
+//       CHECK:   %[[ELEM:.+]] = vector.extract %[[WIDE]][0]
+//       CHECK:   vector.insert %[[ELEM]], %{{.+}} [0]
 //       CHECK:   amdgpu.scaled_mfma
 
 // -----
