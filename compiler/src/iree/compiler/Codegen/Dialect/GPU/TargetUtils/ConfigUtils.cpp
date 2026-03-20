@@ -42,6 +42,12 @@ static llvm::cl::opt<bool> clGPUTestCpromotion(
                    "codegen cant yet support without it if also doing padding"),
     llvm::cl::init(true));
 
+static llvm::cl::list<int64_t> clScaleRepeats(
+    "iree-gpu-scale-repeats",
+    llvm::cl::desc("Scale preshuffling repeat factors [R_m, R_k] to attach "
+                   "to ScaledMMAAttr for coalesced scale reads"),
+    llvm::cl::CommaSeparated, llvm::cl::ZeroOrMore);
+
 namespace mlir::iree_compiler::IREE::GPU {
 
 constexpr int64_t kCacheLineSizeBits = 128 * 8;
@@ -892,6 +898,18 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   }
 
   IREE::Codegen::InnerTileDescAttrInterface kind = schedule->mmaKind;
+
+  if (scaled && clScaleRepeats.size() == 2) {
+    if (auto smma = dyn_cast<GPU::ScaledMMAAttr>(kind)) {
+      SmallVector<int64_t> repeats(clScaleRepeats.begin(),
+                                   clScaleRepeats.end());
+      kind = GPU::ScaledMMAAttr::get(
+          target.getContext(), smma.getIntrinsic(), smma.getLhsElemType(),
+          smma.getRhsElemType(), smma.getAccElemType(),
+          smma.getColMajor(),
+          DenseI64ArrayAttr::get(target.getContext(), repeats));
+    }
+  }
 
   // Attach the MMA schedule as an attribute to the entry point export function
   // for later access in the pipeline.

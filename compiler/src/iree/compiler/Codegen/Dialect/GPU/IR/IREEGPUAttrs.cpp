@@ -33,6 +33,7 @@
 #include "mlir/Dialect/SCF/Transforms/TileUsingInterface.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -1697,6 +1698,255 @@ LogicalResult ScaledMMAAttr::populateOperandOffsetsSizesStrides(
   return success();
 }
 
+// Walk up a value's use-def chain to find the vector.transfer_read and collect
+// static extract offsets along the way. Returns {readOp, extractOffsets} where
+// extractOffsets accumulate the static offsets from extract_strided_slice ops.
+static std::pair<vector::TransferReadOp, SmallVector<int64_t>>
+findSourceTransferReadAndOffsets(Value v) {
+  SmallVector<int64_t> extractOffsets;
+  while (v) {
+    if (auto readOp = v.getDefiningOp<vector::TransferReadOp>()) {
+      size_t numIndices = readOp.getIndices().size();
+      if (extractOffsets.empty()) {
+        extractOffsets.assign(numIndices, 0);
+      } else {
+        extractOffsets.resize(numIndices, 0);
+      }
+      return {readOp, extractOffsets};
+    }
+    if (auto shapeCast = v.getDefiningOp<vector::ShapeCastOp>()) {
+      v = shapeCast.getSource();
+      continue;
+    }
+    if (auto extractSlice =
+            v.getDefiningOp<vector::ExtractStridedSliceOp>()) {
+      ArrayAttr offsets = extractSlice.getOffsets();
+      if (extractOffsets.size() < offsets.size())
+        extractOffsets.resize(offsets.size(), 0);
+      for (auto [i, attr] : llvm::enumerate(offsets))
+        extractOffsets[i] += cast<IntegerAttr>(attr).getInt();
+      v = extractSlice.getSource();
+      continue;
+    }
+    if (auto extract = v.getDefiningOp<vector::ExtractOp>()) {
+      ArrayRef<int64_t> positions = extract.getStaticPosition();
+      if (extractOffsets.size() < positions.size())
+        extractOffsets.resize(positions.size(), 0);
+      for (auto [i, pos] : llvm::enumerate(positions))
+        extractOffsets[i] += pos;
+      v = extract.getSource();
+      continue;
+    }
+    break;
+  }
+  return {nullptr, {}};
+}
+
+// Apply the preshuffled-scale reindex formula.
+//
+// Given original flat (m, k) position in the logical scale tile and repeat
+// factors (R_m, R_k), compute the physical (m', k') in the preshuffled LDS
+// layout.
+//
+// The formula maps from logical scale coordinates to the preshuffled physical
+// layout where R_m * R_k consecutive scale bytes (one per MFMA intrinsic) are
+// stored contiguously, enabling coalesced ds_read_b32 loads.
+static std::pair<Value, Value>
+reindexScaleCoords(OpBuilder &builder, Location loc, Value mIdx, Value kIdx,
+                   int64_t intrinsicM, int64_t intrinsicK, int64_t repeatM,
+                   int64_t repeatK) {
+  int64_t tileM = intrinsicM * repeatM;
+  int64_t numRepeats = repeatM * repeatK;
+
+  auto cst = [&](int64_t v) -> Value {
+    return arith::ConstantIndexOp::create(builder, loc, v);
+  };
+
+  // T_m = m / M, T_k = k / K (which intrinsic tile along M, K)
+  Value tM = arith::DivUIOp::create(builder, loc, mIdx, cst(intrinsicM));
+  Value tK = arith::DivUIOp::create(builder, loc, kIdx, cst(intrinsicK));
+  // T_index = T_m * R_k + T_k (linearized intrinsic index)
+  Value tIndex = arith::AddIOp::create(
+      builder, loc, arith::MulIOp::create(builder, loc, tM, cst(repeatK)),
+      tK);
+  // IntrinsicM = m % M, IntrinsicK = k % K (position within intrinsic)
+  Value intrM = arith::RemUIOp::create(builder, loc, mIdx, cst(intrinsicM));
+  Value intrK = arith::RemUIOp::create(builder, loc, kIdx, cst(intrinsicK));
+
+  // m' = (m / TileM) * TileM + IntrinsicM * R_m + IntrinsicK / R_m
+  Value mTileBase = arith::MulIOp::create(
+      builder, loc,
+      arith::DivUIOp::create(builder, loc, mIdx, cst(tileM)), cst(tileM));
+  Value mPrime = arith::AddIOp::create(
+      builder, loc, mTileBase,
+      arith::AddIOp::create(
+          builder, loc,
+          arith::MulIOp::create(builder, loc, intrM, cst(repeatM)),
+          arith::DivUIOp::create(builder, loc, intrK, cst(repeatM))));
+
+  // k' = (IntrinsicK % R_k) * NumRepeats + T_index % NumRepeats
+  Value kPrime = arith::AddIOp::create(
+      builder, loc,
+      arith::MulIOp::create(
+          builder, loc,
+          arith::RemUIOp::create(builder, loc, intrK, cst(repeatK)),
+          cst(numRepeats)),
+      arith::RemUIOp::create(builder, loc, tIndex, cst(numRepeats)));
+
+  return {mPrime, kPrime};
+}
+
+// Affine-map version of reindexScaleCoords.
+//
+// Encodes the entire reindex formula as affine maps so that downstream
+// canonicalize + affine simplification can:
+//   1. Fold constant repeat/tile indices directly into the map.
+//   2. Compose with linearization maps to prove contiguity across reads.
+//   3. Enable range-based simplification (e.g., m < intrinsicM → m floordiv
+//      intrinsicM = 0) when paired with OptimizeIntArithmetic.
+//
+// The formulas (using affine floordiv / mod which assume non-negative operands):
+//
+//   m'(m, k) = (m floordiv TileM) * TileM
+//              + (m mod intrinsicM) * repeatM
+//              + (k mod intrinsicK) floordiv repeatM
+//
+//   T_index(m, k) = (m floordiv intrinsicM) * repeatK + k floordiv intrinsicK
+//
+//   k'(m, k) = ((k mod intrinsicK) mod repeatK) * numRepeats
+//              + T_index(m, k) mod numRepeats
+//
+static std::pair<Value, Value>
+reindexScaleCoordsAffine(OpBuilder &builder, Location loc, Value mIdx,
+                         Value kIdx, int64_t intrinsicM, int64_t intrinsicK,
+                         int64_t repeatM, int64_t repeatK) {
+  int64_t tileM = intrinsicM * repeatM;
+  int64_t numRepeats = repeatM * repeatK;
+
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr m, k;
+  bindDims(ctx, m, k);
+
+  // m' = (m floordiv TileM) * TileM
+  //    + (m mod intrinsicM) * repeatM
+  //    + (k mod intrinsicK) floordiv repeatM
+  AffineExpr mPrimeExpr = m.floorDiv(tileM) * tileM +
+                          (m % intrinsicM) * repeatM +
+                          (k % intrinsicK).floorDiv(repeatM);
+
+  // T_index = (m floordiv intrinsicM) * repeatK + k floordiv intrinsicK
+  AffineExpr tIndex = m.floorDiv(intrinsicM) * repeatK + k.floorDiv(intrinsicK);
+
+  // k' = ((k mod intrinsicK) mod repeatK) * numRepeats
+  //    + T_index mod numRepeats
+  AffineExpr kPrimeExpr =
+      ((k % intrinsicK) % repeatK) * numRepeats + tIndex % numRepeats;
+
+  AffineMap mMap = AffineMap::get(/*dimCount=*/2, /*symbolCount=*/0,
+                                  mPrimeExpr, ctx);
+  AffineMap kMap = AffineMap::get(/*dimCount=*/2, /*symbolCount=*/0,
+                                  kPrimeExpr, ctx);
+
+  SmallVector<Value, 2> operands = {mIdx, kIdx};
+  Value mPrime = affine::AffineApplyOp::create(builder, loc, mMap, operands);
+  Value kPrime = affine::AffineApplyOp::create(builder, loc, kMap, operands);
+
+  return {mPrime, kPrime};
+}
+
+// Given a scale input value and repeat factors, walk up the use-def chain to
+// find the LDS transfer_read, compute the original flat (m, k) position by
+// combining transfer_read indices with extract offsets, apply the reindex
+// formula, and create a new scalar read from the flat 2D LDS memref.
+//
+// The chain looks like:
+//   transfer_read %expanded_lds[d0, d1, d2, d3] → vector<AxBxCxDxf8>
+//   extract_strided_slice offsets=[i0, 0, i2, 0] → vector<1x1x1x1xf8>
+//   shape_cast → vector<1xf8>
+//
+// The flat position is:
+//   m = (d0 + i0) * innerM + d1
+//   k = (d2 + i2) * innerK + d3
+//
+// After reindexing, we read from the flat LDS memref at (m', k').
+static Value reindexScaleRead(OpBuilder &builder, Location loc, Value scaleVal,
+                              int64_t intrinsicM, int64_t intrinsicK,
+                              int64_t repeatM, int64_t repeatK) {
+  auto [readOp, extractOffsets] = findSourceTransferReadAndOffsets(scaleVal);
+  if (!readOp)
+    return scaleVal;
+
+  // Find the flat 2D LDS memref by walking through expand_shape.
+  Value expandedMemref = readOp.getBase();
+  auto expandOp = expandedMemref.getDefiningOp<memref::ExpandShapeOp>();
+  if (!expandOp)
+    return scaleVal;
+
+  Value flatMemref = expandOp.getSrc();
+  auto flatType = dyn_cast<MemRefType>(flatMemref.getType());
+  if (!flatType || flatType.getRank() != 2)
+    return scaleVal;
+
+  // Get the inner dimension sizes from the expand_shape output.
+  // expand_shape [[0,1], [2,3]] takes memref<MxK> → memref<M/S1 x S1 x K/S3 x S3>
+  // so S1 and S3 are the inner sizes for linearization.
+  ArrayRef<int64_t> expandedShape =
+      cast<MemRefType>(expandOp.getResultType()).getShape();
+  if (expandedShape.size() != 4)
+    return scaleVal;
+  int64_t innerM = expandedShape[1]; // e.g. 16
+  int64_t innerK = expandedShape[3]; // e.g. 4
+
+  SmallVector<Value> readIndices(readOp.getIndices());
+  if (readIndices.size() != 4)
+    return scaleVal;
+
+  auto cst = [&](int64_t v) -> Value {
+    return arith::ConstantIndexOp::create(builder, loc, v);
+  };
+
+  // Compute full 4D position: readIndices + extractOffsets.
+  // d0_full = readIndices[0] + extractOffsets[0]
+  // d1_full = readIndices[1] + extractOffsets[1]  (extractOffsets[1] is 0)
+  // d2_full = readIndices[2] + extractOffsets[2]
+  // d3_full = readIndices[3] + extractOffsets[3]  (extractOffsets[3] is 0)
+  SmallVector<Value> fullIndices(4);
+  for (int i = 0; i < 4; ++i) {
+    if (extractOffsets[i] != 0) {
+      fullIndices[i] = arith::AddIOp::create(builder, loc, readIndices[i],
+                                             cst(extractOffsets[i]));
+    } else {
+      fullIndices[i] = readIndices[i];
+    }
+  }
+
+  // Linearize to 2D: m = d0_full * innerM + d1_full, k = d2_full * innerK +
+  // d3_full.
+  Value flatM = arith::AddIOp::create(
+      builder, loc,
+      arith::MulIOp::create(builder, loc, fullIndices[0], cst(innerM)),
+      fullIndices[1]);
+  Value flatK = arith::AddIOp::create(
+      builder, loc,
+      arith::MulIOp::create(builder, loc, fullIndices[2], cst(innerK)),
+      fullIndices[3]);
+
+  // Apply the reindex formula using affine maps for better downstream
+  // simplification (constants fold into the map, enabling contiguity proofs).
+  auto [mPrime, kPrime] = reindexScaleCoordsAffine(builder, loc, flatM, flatK,
+                                                   intrinsicM, intrinsicK,
+                                                   repeatM, repeatK);
+
+  // Create a new scalar read from the flat 2D LDS memref.
+  FloatType f8E8M0 = builder.getF8E8M0Type();
+  VectorType scalarVecType = VectorType::get({1}, f8E8M0);
+  SmallVector<bool> inBounds = {true};
+  auto newRead = vector::TransferReadOp::create(
+      builder, loc, scalarVecType, flatMemref, ValueRange{mPrime, kPrime},
+      readOp.getPadding(), ArrayRef<bool>{true});
+  return newRead.getResult();
+}
+
 LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
     OpBuilder &builder, Location loc, ValueRange inputs, ValueRange outputs,
     SmallVectorImpl<Value> &results) const {
@@ -1716,17 +1966,34 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
   SmallVector<VectorType> subgroupTypes;
   getUndistributedTileTypes(subgroupTypes);
 
-  // Note: the scales argument is given as a vector of 4
-  // scales + a constant selector to say which byte in the vector is to be used.
-  // This'll allow better value reuse, hence why we extend to 4-vectors
-  // instead of clamping to scalars here.
-
   FloatType f8E8M0 = builder.getF8E8M0Type();
   Value zeroScales = arith::ConstantOp::create(
       builder, loc,
       SplatElementsAttr::get(
           VectorType::get({getScalesVectorSize()}, f8E8M0),
           llvm::APFloat::getSmallest(f8E8M0.getFloatSemantics())));
+
+  Value lhsScaleInput = inputs[kScaledMMAOperandLhsScale];
+  Value rhsScaleInput = inputs[kScaledMMAOperandRhsScale];
+
+  // When repeats are present, reindex scale reads to account for preshuffled
+  // data in LDS.
+  if (hasRepeats()) {
+    MMASingleSubgroupLayout lhsScaleLayout =
+        getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandLhsScale);
+    int64_t intrinsicM =
+        lhsScaleLayout.outer[0] * lhsScaleLayout.thread[0] *
+        lhsScaleLayout.element[0];
+    int64_t intrinsicK =
+        lhsScaleLayout.outer[1] * lhsScaleLayout.thread[1] *
+        lhsScaleLayout.element[1];
+
+    lhsScaleInput = reindexScaleRead(builder, loc, lhsScaleInput,
+                                     intrinsicM, intrinsicK,
+                                     getRepeatM(), getRepeatK());
+    // TODO: RHS scale reindexing (N dimension instead of M).
+  }
+
   auto padScales = [&](Value scales) {
     Value scale = vector::ExtractOp::create(builder, loc, scales, 0);
     Value padded = vector::InsertOp::create(builder, loc, scale, zeroScales, 0);
@@ -1735,20 +2002,16 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
 
   Value lhs = inputs[kScaledMMAOperandLhs];
   Value rhs = inputs[kScaledMMAOperandRhs];
-  Value lhsScales = padScales(inputs[kScaledMMAOperandLhsScale]);
-  Value rhsScales = padScales(inputs[kScaledMMAOperandRhsScale]);
+  Value lhsScales = padScales(lhsScaleInput);
+  Value rhsScales = padScales(rhsScaleInput);
   Value acc = outputs[0];
 
   ArrayRef<int64_t> lhsShape = subgroupTypes[kScaledMMAOperandLhs].getShape();
   ArrayRef<int64_t> rhsShape = subgroupTypes[kScaledMMAOperandRhs].getShape();
   int64_t m = lhsShape[0];
-  // We use m x [k / kPerBlock] x blockSize as the LHS pre-distribution shape
-  // since this makes the higher-level tiling clearer.
   int64_t k = lhsShape[1] * lhsShape[2];
   int64_t n = rhsShape[2];
 
-  // Since the LHS and RHS layouts are both {M,N}xK, we can get a column-major
-  // result just by swapping the LHS and RHS.
   if (getColMajor()) {
     std::swap(lhs, rhs);
     std::swap(lhsScales, rhsScales);

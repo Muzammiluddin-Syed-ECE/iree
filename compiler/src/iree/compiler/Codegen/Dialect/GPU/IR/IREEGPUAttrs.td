@@ -624,7 +624,11 @@ def IREEGPU_ScaledMMAAttr :
     "::mlir::Type":$lhs_elem_type,
     "::mlir::Type":$rhs_elem_type,
     "::mlir::Type":$acc_elem_type,
-    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major
+    DefaultValuedParameter<"bool", "false", "if this is a column-major scaled MFMA">:$col_major,
+    OptionalParameter<"::mlir::DenseI64ArrayAttr",
+      "Scale preshuffling repeat factors [R_m, R_k]. When present, "
+      "buildUnderlyingOperations reindexes scale reads to account for "
+      "preshuffled data in LDS.">:$repeats
   );
 
   let extraClassDeclaration = [{
@@ -658,6 +662,18 @@ def IREEGPU_ScaledMMAAttr :
       ::llvm::ArrayRef<int64_t> accShape = preThreadTypes[4].getShape();
       ::llvm::ArrayRef<int64_t> lhsShape = preThreadTypes[0].getShape();
       return {accShape[0], accShape[1], lhsShape[1], lhsShape[2]};
+    }
+
+    bool hasRepeats() const {
+      return getRepeats() && !getRepeats().empty();
+    }
+
+    int64_t getRepeatM() const {
+      return hasRepeats() ? getRepeats()[0] : 1;
+    }
+
+    int64_t getRepeatK() const {
+      return hasRepeats() ? getRepeats()[1] : 1;
     }
   }];
 }
