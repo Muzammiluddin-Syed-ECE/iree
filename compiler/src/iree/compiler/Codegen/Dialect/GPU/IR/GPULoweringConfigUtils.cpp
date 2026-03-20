@@ -151,6 +151,24 @@ std::optional<SmallVector<int64_t>> getPaddingList(LoweringConfigAttr config,
   return getIntegerVector(array);
 }
 
+constexpr StringLiteral kScaleRepeatsName = "scale_repeats";
+
+std::optional<SmallVector<int64_t>>
+getScaleRepeats(LoweringConfigAttr config) {
+  auto array = config.getAttributes().getAs<ArrayAttr>(kScaleRepeatsName);
+  if (!array) {
+    return std::nullopt;
+  }
+  return getIntegerVector(array);
+}
+
+void appendScaleRepeats(MLIRContext *context,
+                        SmallVectorImpl<NamedAttribute> &attrs,
+                        ArrayRef<int64_t> repeats) {
+  Builder b(context);
+  attrs.emplace_back(kScaleRepeatsName, b.getI64ArrayAttr(repeats));
+}
+
 constexpr StringLiteral kDimensionExpansionName = "expand_dims";
 
 DimensionExpansionAttr getDimensionExpansion(LoweringConfigAttr config) {

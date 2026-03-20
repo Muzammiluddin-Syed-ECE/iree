@@ -219,7 +219,8 @@ Attribute TensorUKernelProviderAttr::getDataLayoutForUKernel(
       auto intrinsicAttr = GPU::ScaledMMAAttr::get(
           matchTypes.getContext(), dtScaledMma.getIntrinsic(),
           /*lhs_elem_type=*/types[0], /*rhs_elem_type=*/types[1],
-          /*acc_elem_type=*/types[4], /*col_major=*/false);
+          /*acc_elem_type=*/types[4], /*col_major=*/false,
+          /*repeats=*/nullptr);
       if (!llvm::is_contained(targetAttr.getWgp().getScaledMma(),
                               intrinsicAttr)) {
         continue;
