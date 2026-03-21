@@ -23,6 +23,9 @@ namespace mlir::iree_compiler {
 
 static constexpr int32_t kNumGPUDims = 3;
 static constexpr int32_t kWarpSize = 32;
+// Each shared memory bank is 4 bytes (32 bits) wide on all current GPU
+// architectures (NVIDIA and AMD).
+static constexpr int64_t kSharedMemoryBankWidthBytes = 4;
 
 //===----------------------------------------------------------------------===//
 // GPU processor IDs and sizes
@@ -280,6 +283,22 @@ getXorShuffleAttr(MLIRContext *context, Attribute baseConfigAttr,
                   IREE::GPU::TargetAttr target,
                   IREE::Codegen::InnerTileDescAttrInterface intrinsic,
                   ArrayRef<int64_t> reductionTileSizes, int operandIndex);
+
+/// Returns true if a 2D shared memory layout with the given inner-dimension
+/// width (in elements) and element type would cause LDS bank conflicts on
+/// |target|.  Uses gcd(rowStrideBanks, numBanks): conflicts occur when
+/// gcd > 1 or when the stride is 0 (all rows alias the same banks).
+bool hasBankConflicts(int64_t innerDimElements, Type elementType,
+                      IREE::GPU::TargetAttr target);
+
+/// Returns the ideal XOR shuffle row width (in elements) for the given access
+/// width, tile size, element bitwidth, and target.  The row width is clamped to
+/// [accessWidth, kTileSize] and sized so that one row spans all LDS banks.
+/// Falls back to |accessWidth| when the bank count is unavailable.
+int64_t getIdealXorRowWidth(int64_t accessWidth, int64_t kTileSize,
+                            int64_t elementBitwidth,
+                            IREE::GPU::TargetAttr target);
+
 //===----------------------------------------------------------------------===//
 // GPU CodeGen op filter
 //===----------------------------------------------------------------------===//

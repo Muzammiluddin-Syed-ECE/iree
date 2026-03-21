@@ -982,19 +982,26 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       promotionArray = {};
     } else {
-      // When scale repeats are active, XOR-swizzle the scale operands in LDS
-      // to eliminate bank conflicts from the wide reads in reindexScaleRead.
-      // rowWidth=64 and accessWidth=numRepeats place each repeat group into
-      // its own column-group; the XOR with the virtual row index distributes
-      // accesses across all 32 banks.
+      // When scale repeats are active, XOR-swizzle the scale operands in
+      // LDS only if the resulting layout would cause bank conflicts.
       Attribute scalePromoAttr = defaultConfigAttr;
       if (clScaleRepeats.size() == 2) {
-        int64_t numRepeats = clScaleRepeats[0] * clScaleRepeats[1];
-        auto scaleSwizzle = IREE::Codegen::XORShuffleAttr::get(
-            context, /*rowWidth=*/64, /*accessWidth=*/numRepeats,
-            /*rowStride=*/int64_t(0), /*perPhase=*/int64_t(0));
-        scalePromoAttr = IREE::GPU::SwizzleOperandAttr::get(
-            context, defaultConfigAttr, scaleSwizzle);
+        auto smma = cast<GPU::ScaledMMAAttr>(kind);
+        int64_t scaleIntrinsicK = getKSize(smma.getIntrinsic());
+        int64_t scaleKLds =
+            reductionTileSizes[kDims.front()] * scaleIntrinsicK;
+        Type scaleElemType = b.getF8E8M0Type();
+        if (hasBankConflicts(scaleKLds, scaleElemType, target)) {
+          int64_t numRepeats = clScaleRepeats[0] * clScaleRepeats[1];
+          int64_t bitwidth = scaleElemType.getIntOrFloatBitWidth();
+          int64_t rowWidth =
+              getIdealXorRowWidth(numRepeats, scaleKLds, bitwidth, target);
+          auto scaleSwizzle = IREE::Codegen::XORShuffleAttr::get(
+              context, rowWidth, /*accessWidth=*/numRepeats,
+              /*rowStride=*/int64_t(0), /*perPhase=*/int64_t(0));
+          scalePromoAttr = IREE::GPU::SwizzleOperandAttr::get(
+              context, defaultConfigAttr, scaleSwizzle);
+        }
       }
       promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, scalePromoAttr,
                         scalePromoAttr};
