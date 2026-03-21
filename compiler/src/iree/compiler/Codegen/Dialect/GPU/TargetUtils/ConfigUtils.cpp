@@ -901,6 +901,20 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
 
   if (scaled && clScaleRepeats.size() == 2) {
     if (auto smma = dyn_cast<GPU::ScaledMMAAttr>(kind)) {
+      int64_t repeatK = clScaleRepeats[1];
+
+      // Ensure the scale-K tile count is at least R_k so that the
+      // preshuffled scale groups are fully utilized.  The scale K dimension
+      // is the first (outermost) K dimension, which appears in the scale
+      // indexing maps.  With R_k repeats we need at least R_k K-tiles
+      // (= R_k * scaleIntrinsicK elements) simultaneously in LDS.
+      if (!kDims.empty()) {
+        int64_t scaleKDim = kDims.front();
+        if (reductionTileSizes[scaleKDim] < repeatK) {
+          reductionTileSizes[scaleKDim] = repeatK;
+        }
+      }
+
       SmallVector<int64_t> repeats(clScaleRepeats.begin(),
                                    clScaleRepeats.end());
       kind = GPU::ScaledMMAAttr::get(
