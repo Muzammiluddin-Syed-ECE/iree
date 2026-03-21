@@ -297,6 +297,24 @@ getContractionHeuristicSeeds(IREE::GPU::TargetAttr target,
               : (scaled ? archSeeds.scaledGemm : archSeeds.gemm);
   GPUMMAHeuristicSeeds result = table[static_cast<int>(*problem.gemmSize)];
   result.bestKElementCountPerSubgroup /= problem.aType.getIntOrFloatBitWidth();
+
+  // When scale repeats are specified, ensure the K element and tile counts are
+  // large enough.  The preshuffled layout interleaves R_k scale-K tiles, so
+  // the schedule must place at least R_k tiles (= R_k * intrinsicK elements)
+  // along K to fill every position in the wide read.
+  if (scaled && clScaleRepeats.size() == 2) {
+    int64_t repeatK = clScaleRepeats[1];
+    if (result.bestKTileCountPerSubgroup < repeatK) {
+      result.bestKTileCountPerSubgroup = repeatK;
+    }
+    // The innermost K size for MFMA_SCALE is 128 (data elements).  Require at
+    // least repeatK * 128 so the heuristic picks enough K tiles.
+    int64_t minKElements = repeatK * 128;
+    if (result.bestKElementCountPerSubgroup < minKElements) {
+      result.bestKElementCountPerSubgroup = minKElements;
+    }
+  }
+
   return result;
 }
 
@@ -964,8 +982,22 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       promotionArray = {};
     } else {
-      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, defaultConfigAttr,
-                        defaultConfigAttr};
+      // When scale repeats are active, XOR-swizzle the scale operands in LDS
+      // to eliminate bank conflicts from the wide reads in reindexScaleRead.
+      // rowWidth=64 and accessWidth=numRepeats place each repeat group into
+      // its own column-group; the XOR with the virtual row index distributes
+      // accesses across all 32 banks.
+      Attribute scalePromoAttr = defaultConfigAttr;
+      if (clScaleRepeats.size() == 2) {
+        int64_t numRepeats = clScaleRepeats[0] * clScaleRepeats[1];
+        auto scaleSwizzle = IREE::Codegen::XORShuffleAttr::get(
+            context, /*rowWidth=*/64, /*accessWidth=*/numRepeats,
+            /*rowStride=*/int64_t(0), /*perPhase=*/int64_t(0));
+        scalePromoAttr = IREE::GPU::SwizzleOperandAttr::get(
+            context, defaultConfigAttr, scaleSwizzle);
+      }
+      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, scalePromoAttr,
+                        scalePromoAttr};
     }
   }
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {

@@ -1737,6 +1737,20 @@ findSourceTransferReadAndOffsets(Value v) {
       v = extract.getSource();
       continue;
     }
+    if (auto transpose = v.getDefiningOp<vector::TransposeOp>()) {
+      ArrayRef<int64_t> perm = transpose.getPermutation();
+      size_t rank = perm.size();
+      extractOffsets.resize(rank, 0);
+      // Permute offsets from output-space to input-space: for transpose with
+      // perm[i], output dim i comes from input dim perm[i], so
+      // inputOffsets[perm[i]] = outputOffsets[i].
+      SmallVector<int64_t> permuted(rank, 0);
+      for (size_t i = 0; i < rank; ++i)
+        permuted[perm[i]] = extractOffsets[i];
+      extractOffsets = permuted;
+      v = transpose.getVector();
+      continue;
+    }
     break;
   }
   return {nullptr, {}};
@@ -1966,19 +1980,33 @@ static Value reindexScaleRead(OpBuilder &builder, Location loc, Value scaleVal,
   Value baseFlatAddr = affine::AffineApplyOp::create(
       builder, loc, linearizeMap, ValueRange{mPrimeBase, kPrimeBase});
 
-  // Create a 1D view of the LDS memref for the wide read.
+  // Obtain a 1D view of the LDS buffer for the wide read.
+  // If the 2D memref comes from a SwizzleHintOp (via expand_shape), read
+  // directly from the hint result so that ResolveSwizzleHints can later
+  // apply the matching XOR address transformation.  Otherwise fall back to
+  // a reinterpret_cast.
   FloatType f8E8M0 = builder.getF8E8M0Type();
   int64_t totalElems = mLds * kLds;
-  auto flat1DType = MemRefType::get({totalElems}, f8E8M0,
-                                    MemRefLayoutAttrInterface{},
-                                    flatType.getMemorySpace());
-  Value flat1D = memref::ReinterpretCastOp::create(
-      builder, loc, flat1DType, flatMemref,
-      /*offsets=*/ValueRange{}, /*sizes=*/ValueRange{},
-      /*strides=*/ValueRange{},
-      /*static_offsets=*/ArrayRef<int64_t>{0},
-      /*static_sizes=*/ArrayRef<int64_t>{totalElems},
-      /*static_strides=*/ArrayRef<int64_t>{1});
+  Value flat1D;
+  if (auto expand2DFrom1D =
+          flatMemref.getDefiningOp<memref::ExpandShapeOp>()) {
+    Value src1D = expand2DFrom1D.getSrc();
+    if (src1D.getDefiningOp<IREE::Codegen::SwizzleHintOp>()) {
+      flat1D = src1D;
+    }
+  }
+  if (!flat1D) {
+    auto flat1DType = MemRefType::get({totalElems}, f8E8M0,
+                                      MemRefLayoutAttrInterface{},
+                                      flatType.getMemorySpace());
+    flat1D = memref::ReinterpretCastOp::create(
+        builder, loc, flat1DType, flatMemref,
+        /*offsets=*/ValueRange{}, /*sizes=*/ValueRange{},
+        /*strides=*/ValueRange{},
+        /*static_offsets=*/ArrayRef<int64_t>{0},
+        /*static_sizes=*/ArrayRef<int64_t>{totalElems},
+        /*static_strides=*/ArrayRef<int64_t>{1});
+  }
 
   // Read a contiguous vector of numRepeats scale bytes.
   VectorType wideVecType = VectorType::get({numRepeats}, f8E8M0);
@@ -2037,7 +2065,19 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
     lhsScaleInput = reindexScaleRead(builder, loc, lhsScaleInput,
                                      intrinsicM, intrinsicK,
                                      getRepeatM(), getRepeatK());
-    // TODO: RHS scale reindexing (N dimension instead of M).
+
+    MMASingleSubgroupLayout rhsScaleLayout =
+        getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandRhsScale);
+    int64_t intrinsicN =
+        rhsScaleLayout.outer[0] * rhsScaleLayout.thread[0] *
+        rhsScaleLayout.element[0];
+    int64_t intrinsicKRhs =
+        rhsScaleLayout.outer[1] * rhsScaleLayout.thread[1] *
+        rhsScaleLayout.element[1];
+
+    rhsScaleInput = reindexScaleRead(builder, loc, rhsScaleInput,
+                                     intrinsicN, intrinsicKRhs,
+                                     getRepeatM(), getRepeatK());
   }
 
   auto padScales = [&](Value scales) {
