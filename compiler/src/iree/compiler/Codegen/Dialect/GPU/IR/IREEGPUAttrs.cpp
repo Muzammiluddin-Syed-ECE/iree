@@ -2172,11 +2172,11 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
     MMASingleSubgroupLayout rhsScaleLayout =
         getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandRhsScale);
     int64_t intrinsicN =
-        rhsScaleLayout.outer[0] * rhsScaleLayout.thread[0] *
-        rhsScaleLayout.element[0];
-    int64_t intrinsicKRhs =
         rhsScaleLayout.outer[1] * rhsScaleLayout.thread[1] *
         rhsScaleLayout.element[1];
+    int64_t intrinsicKRhs =
+        rhsScaleLayout.outer[0] * rhsScaleLayout.thread[0] *
+        rhsScaleLayout.element[0];
 
     rhsScaleInput = reindexScaleRead(builder, loc, rhsScaleInput,
                                      intrinsicN, intrinsicKRhs,

@@ -12,6 +12,7 @@
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
+#include <numeric>
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/DebugLog.h"
@@ -910,39 +911,15 @@ FailureOr<XorShuffleParams> getXorShuffleParamsForUntunedChipset(
     IREE::GPU::TargetAttr target,
     IREE::Codegen::InnerTileDescAttrInterface intrinsic,
     ArrayRef<int64_t> reductionTileSizes, int operandIndex) {
-  // Compute XOR shuffle swizzle parameters for bank conflict avoidance.
-  // - rowElems: Select entirety of K Tile size, may not prevent bank
-  //              conflicts if the K tile size is too small.
-  // - accessElems: number of contiguous elements each thread accesses,
-  //                 derived from the MMA intrinsic's element layout.
   int64_t numAccessElems = getNumAccessElems(intrinsic, operandIndex).value();
-
-  // Calculate K tile size (total K elements in shared memory) to use as row
-  // width. For small K tiles, this may not reduce bank conflicts effectively.
   int64_t kTileSize =
       llvm::product_of(reductionTileSizes) * getKSize(intrinsic).value();
-
-  // Figure out how many elements can fit across all banks of LDS.
-  IREE::GPU::TargetWgpAttr wgp = target.getWgp();
   FailureOr<int64_t> bitwidth = getOperandBitwidth(intrinsic, operandIndex);
-  if (failed(bitwidth)) {
+  if (failed(bitwidth))
     return failure();
-  }
-  std::optional<int64_t> workgroupMemoryBankCount =
-      wgp.getWorkgroupMemoryBankCount();
-  if (!workgroupMemoryBankCount.has_value()) {
-    return failure();
-  }
-  // Assuming each bank is 4 bytes wide (32 bits).
-  int64_t ldsBankWidthBits =
-      (workgroupMemoryBankCount.value() * int64_t(32)) / *bitwidth;
 
-  // Row width must be less than or equal to the row size (in elements) of LDS
-  // bank width to prevent bank conflicts.
-  int64_t effectiverowElems = std::min(ldsBankWidthBits, kTileSize);
-
-  // Ensure row width is at least access width (minimum 1 column).
-  effectiverowElems = std::max(effectiverowElems, numAccessElems);
+  int64_t effectiverowElems =
+      getIdealXorRowWidth(numAccessElems, kTileSize, *bitwidth, target);
   return validateXorShuffle(XorShuffleParams({/*rowElems=*/effectiverowElems,
                                               /*accessElems=*/numAccessElems}),
                             intrinsic, operandIndex);
@@ -980,6 +957,37 @@ getXorShuffleAttr(MLIRContext *context, Attribute baseConfigAttr,
       /*per_phase=*/int64_t(0));
   return IREE::GPU::SwizzleOperandAttr::get(context, baseConfigAttr,
                                             swizzleAttr);
+}
+
+bool hasBankConflicts(int64_t innerDimElements, Type elementType,
+                      IREE::GPU::TargetAttr target) {
+  IREE::GPU::TargetWgpAttr wgp = target.getWgp();
+  std::optional<int64_t> maybeBankCount = wgp.getWorkgroupMemoryBankCount();
+  if (!maybeBankCount)
+    return true;
+  int64_t numBanks = *maybeBankCount;
+
+  int64_t rowBytes =
+      (innerDimElements * elementType.getIntOrFloatBitWidth()) / 8;
+  int64_t rowStrideBanks =
+      (rowBytes / kSharedMemoryBankWidthBytes) % numBanks;
+
+  if (rowStrideBanks == 0)
+    return true;
+  return std::gcd(rowStrideBanks, numBanks) != 1;
+}
+
+int64_t getIdealXorRowWidth(int64_t accessWidth, int64_t kTileSize,
+                            int64_t elementBitwidth,
+                            IREE::GPU::TargetAttr target) {
+  IREE::GPU::TargetWgpAttr wgp = target.getWgp();
+  std::optional<int64_t> maybeBankCount = wgp.getWorkgroupMemoryBankCount();
+  if (!maybeBankCount)
+    return accessWidth;
+  int64_t ldsBankWidthElems =
+      (*maybeBankCount * kSharedMemoryBankWidthBytes * 8) / elementBitwidth;
+  int64_t rowWidth = std::min(ldsBankWidthElems, kTileSize);
+  return std::max(rowWidth, accessWidth);
 }
 
 //===----------------------------------------------------------------------===//
