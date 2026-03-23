@@ -50,6 +50,12 @@ static llvm::cl::opt<bool> clExperimentalMultiUseEncodingFusion(
         "Enable encoding op fusion if the producer has more than one use"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> clHybridScaleEncoding(
+    "iree-dispatch-creation-hybrid-scale-encoding",
+    llvm::cl::desc("Enable hybrid scale preshuffling: only hoist scale operand "
+                   "encodings and strip data encodings from dispatches"),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<DispatchCreation::EncodingOptions> clSetEncodingStrategy(
     "iree-dispatch-creation-set-encoding-strategy",
     llvm::cl::desc("Set the encoding strategy for operations."),
@@ -253,7 +259,7 @@ static void addDispatchRegionCreationPasses(OpPassManager &passManager,
   // Experimental data tiling path. The intent of this path is to set encodings
   // after fusion decisions have already been made, so encodings can be
   // separated from compiler fusion decisions.
-  if (options.dataTiling) {
+  if (options.dataTiling || clHybridScaleEncoding) {
     FunctionLikeNest(passManager)
         // Run canonicalizer first to make propagation easier.
         .addPass([&]() {
@@ -273,7 +279,12 @@ static void addDispatchRegionCreationPasses(OpPassManager &passManager,
     // op, so hoist them out of their current dispatch regions. Also, bubble
     // SetEncodingOps through special operations like bit-extending ops and
     // broadcasting ops.
-    passManager.addPass(DispatchCreation::createHoistEncodingOpsPass());
+    {
+      HoistEncodingOpsPassOptions hoistOptions;
+      hoistOptions.hybridScaleEncoding = clHybridScaleEncoding;
+      passManager.addPass(
+          DispatchCreation::createHoistEncodingOpsPass(hoistOptions));
+    }
   }
   FunctionLikeNest(passManager)
       .addPass([&]() {

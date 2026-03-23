@@ -9,6 +9,7 @@
 
 #include "iree/compiler/Dialect/Encoding/IR/EncodingDialect.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
+#include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
 #include "iree/compiler/Dialect/Flow/Conversion/TensorToFlow/Utils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
@@ -309,8 +310,19 @@ void HoistEncodingOpsPass::runOnOperation() {
     if (inputType.getRank() == 0) {
       return;
     }
-    // Avoid hoisting set encodings that are using the padding encodings.
+    // In hybrid mode, only hoist scale operand encodings.
     Attribute encoding = setEncodingOp.getResultType().getEncoding();
+    if (hybridScaleEncoding) {
+      if (auto encAttr =
+              dyn_cast_if_present<IREE::Encoding::EncodingAttr>(encoding)) {
+        int64_t opIndex = encAttr.getOperandIndex().getInt();
+        if (opIndex != IREE::Encoding::SCALED_MATMUL_LHS_SCALES &&
+            opIndex != IREE::Encoding::SCALED_MATMUL_RHS_SCALES) {
+          return;
+        }
+      }
+    }
+    // Avoid hoisting set encodings that are using the padding encodings.
     if (isa_and_nonnull<IREE::Encoding::PaddingAttr>(encoding)) {
       return;
     }
@@ -373,6 +385,10 @@ void HoistEncodingOpsPass::runOnOperation() {
       }
     }
   }
+
+  // In hybrid mode, non-scale encoding ops remain inside dispatches. The
+  // encoding resolver returns identity for non-scale operands so the
+  // materialization pass converts them to no-ops. No stripping needed here.
 
   RewritePatternSet cleanPatterns(ctx);
   memref::populateResolveRankedShapedTypeResultDimsPatterns(cleanPatterns);
