@@ -182,6 +182,9 @@ public:
           if (IREE::Codegen::isIdentityLayout(encodingInfo)) {
             return type.dropEncoding();
           }
+          if (encodingInfo.isSameShapePermutation) {
+            return type.dropEncoding();
+          }
           // Mark scalable tiles as dynamic sizes for the shape inference. Note,
           // scalable tiles that are represented with static inner tile sizes.
           SmallVector<int64_t> innerTileSizesVector =
@@ -251,11 +254,13 @@ public:
     IREE::Codegen::MaterializeEncodingInfo encodingInfo =
         getEncodingInfoFromLayout(boundType, layoutAttr);
     newSizes = getMixedValues(boundType.getShape(), dynamicDims, builder);
-    FailureOr<SmallVector<OpFoldResult>> convertedMixedSizes =
-        getPackedDimsForDispatchTensorImpl(builder, loc, type, dynamicDims,
-                                           layoutAttr, encodingInfo);
-    if (succeeded(convertedMixedSizes)) {
-      newSizes = convertedMixedSizes.value();
+    if (!encodingInfo.isSameShapePermutation) {
+      FailureOr<SmallVector<OpFoldResult>> convertedMixedSizes =
+          getPackedDimsForDispatchTensorImpl(builder, loc, type, dynamicDims,
+                                             layoutAttr, encodingInfo);
+      if (succeeded(convertedMixedSizes)) {
+        newSizes = convertedMixedSizes.value();
+      }
     }
     newOffsets.resize(newSizes.size(), builder.getIndexAttr(0));
     newStrides.resize(newSizes.size(), builder.getIndexAttr(1));

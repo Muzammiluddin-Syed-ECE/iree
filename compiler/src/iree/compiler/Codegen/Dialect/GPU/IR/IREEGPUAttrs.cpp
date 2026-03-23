@@ -1868,6 +1868,74 @@ reindexScaleCoordsAffine(OpBuilder &builder, Location loc, Value mIdx,
   return {mPrime, kPrime};
 }
 
+// TileSwizzle-compatible reindex for preshuffled scale coordinates.
+//
+// Matches the permutation produced by DataTiledScaledMMAAttr::getTileSwizzle()
+// when both operands_interleaving_intrinsics_m and _k are set for scales.
+// The physical dimension order is [tK, tM, iM, iK] with product-of-trailing-
+// dims strides, which places all numRepeats = repeatM * repeatK elements
+// contiguously per thread.
+//
+// The formula decomposes logical (m, k) into four components:
+//   tM = m mod intrinsicM        (thread position within intrinsic along M)
+//   iM = m floordiv intrinsicM   (which intrinsic tile along M)
+//   tK = k mod intrinsicK        (thread position within intrinsic along K)
+//   iK = k floordiv intrinsicK   (which intrinsic tile along K)
+//
+// Then linearizes in [tK, tM, iM, iK] order and delinearizes back to 2D:
+//   flat = tK * (intrinsicM * numRepeats)
+//        + tM * numRepeats
+//        + iM * repeatK
+//        + iK
+//   m'   = flat floordiv kTotal
+//   k'   = flat mod kTotal
+//
+static std::pair<Value, Value>
+reindexScaleCoordsAffineProperly(OpBuilder &builder, Location loc, Value mIdx,
+                                 Value kIdx, int64_t intrinsicM,
+                                 int64_t intrinsicK, int64_t repeatM,
+                                 int64_t repeatK) {
+  int64_t numRepeats = repeatM * repeatK;
+  int64_t kTotal = intrinsicK * repeatK;
+  int64_t tileM = intrinsicM * repeatM;
+  int64_t tileK = intrinsicK * repeatK;
+
+  MLIRContext *ctx = builder.getContext();
+  AffineExpr m, k;
+  bindDims(ctx, m, k);
+
+  // Split into outer tile index and tile-local coordinate.
+  AffineExpr outerM = m.floorDiv(tileM);
+  AffineExpr localM = m % tileM;
+  AffineExpr outerK = k.floorDiv(tileK);
+  AffineExpr localK = k % tileK;
+
+  // Decompose tile-local coordinates into thread/intrinsic components.
+  AffineExpr tM = localM % intrinsicM;
+  AffineExpr iM = localM.floorDiv(intrinsicM);
+  AffineExpr tK = localK % intrinsicK;
+  AffineExpr iK = localK.floorDiv(intrinsicK);
+
+  // Compute flat offset within the tile in preshuffled [tK,tM,iM,iK] order.
+  AffineExpr flatOffset = tK * (intrinsicM * numRepeats) +
+                          tM * numRepeats + iM * repeatK + iK;
+
+  // Convert back to 2D and add outer tile offsets.
+  AffineExpr mPrimeExpr = outerM * tileM + flatOffset.floorDiv(kTotal);
+  AffineExpr kPrimeExpr = outerK * tileK + flatOffset % kTotal;
+
+  AffineMap mMap =
+      AffineMap::get(/*dimCount=*/2, /*symbolCount=*/0, mPrimeExpr, ctx);
+  AffineMap kMap =
+      AffineMap::get(/*dimCount=*/2, /*symbolCount=*/0, kPrimeExpr, ctx);
+
+  SmallVector<Value, 2> operands = {mIdx, kIdx};
+  Value mPrime = affine::AffineApplyOp::create(builder, loc, mMap, operands);
+  Value kPrime = affine::AffineApplyOp::create(builder, loc, kMap, operands);
+
+  return {mPrime, kPrime};
+}
+
 // Given a scale input value and repeat factors, walk up the use-def chain to
 // find the LDS transfer_read, compute the group's base address in the
 // preshuffled LDS, emit a wide vector read of numRepeats elements, and
@@ -1878,6 +1946,13 @@ reindexScaleCoordsAffine(OpBuilder &builder, Location loc, Value mIdx,
 //   vector.extract [i0, i2, ...] → vector<1x1xf8>
 //   shape_cast → vector<1xf8>
 //
+// The expand_shape [[0,1],[2,3]] provides the intrinsic dimensions:
+//   For LHS: memref<M×Ko> → [M_tiles, intrinsicM, K_tiles, intrinsicK]
+//   For RHS: memref<Ko×N> → [Ko_tiles, intrinsicKo, N_tiles, intrinsicN]
+// The intrinsic dimensions (intrinsicM, intrinsicK) are always derived from
+// expand_shape dims [1] and [3], giving correct per-operand dimensions
+// regardless of whether the operand is LHS or RHS.
+//
 // The extractOffsets [i0, _, i2, _] identify which intrinsic tile this is
 // (T_m = i0, T_k = i2). The readIndices [d0, d1, d2, d3] are the thread's
 // position (same for all intrinsics in the subgroup).
@@ -1887,7 +1962,6 @@ reindexScaleCoordsAffine(OpBuilder &builder, Location loc, Value mIdx,
 // We compute the group's base address from readIndices only (not
 // extractOffsets), so CSE can merge the wide reads across intrinsics.
 static Value reindexScaleRead(OpBuilder &builder, Location loc, Value scaleVal,
-                              int64_t intrinsicM, int64_t intrinsicK,
                               int64_t repeatM, int64_t repeatK) {
   auto [readOp, extractOffsets] = findSourceTransferReadAndOffsets(scaleVal);
   if (!readOp)
@@ -1904,15 +1978,20 @@ static Value reindexScaleRead(OpBuilder &builder, Location loc, Value scaleVal,
   if (!flatType || flatType.getRank() != 2)
     return scaleVal;
 
-  // Get the inner dimension sizes from the expand_shape output.
+  // Derive intrinsic dimensions from the expand_shape output.
   // expand_shape [[0,1], [2,3]]: memref<MxK> → memref<D0 x D1 x D2 x D3>
-  // D1 = innerM (intrinsicM), D3 = innerK (intrinsicK).
+  //   D0 = outer tiles dim0 (M_tiles for LHS, Ko_tiles for RHS)
+  //   D1 = inner dim0     (intrinsicM for LHS, intrinsicKo for RHS)
+  //   D2 = outer tiles dim1 (K_tiles for LHS, N_tiles for RHS)
+  //   D3 = inner dim1     (intrinsicK for LHS, intrinsicN for RHS)
   ArrayRef<int64_t> expandedShape =
       cast<MemRefType>(expandOp.getResultType()).getShape();
   if (expandedShape.size() != 4)
     return scaleVal;
   int64_t innerM = expandedShape[1];
   int64_t innerK = expandedShape[3];
+  int64_t intrinsicM = innerM;
+  int64_t intrinsicK = innerK;
 
   SmallVector<Value> readIndices(readOp.getIndices());
   if (readIndices.size() != 4)
@@ -1967,7 +2046,7 @@ static Value reindexScaleRead(OpBuilder &builder, Location loc, Value scaleVal,
   }
 
   // Reindex the group base to get (m'_base, k'_base) in the preshuffled LDS.
-  auto [mPrimeBase, kPrimeBase] = reindexScaleCoordsAffine(
+  auto [mPrimeBase, kPrimeBase] = reindexScaleCoordsAffineProperly(
       builder, loc, baseFlatM, baseFlatK, intrinsicM, intrinsicK, repeatM,
       repeatK);
 
@@ -2051,32 +2130,13 @@ LogicalResult ScaledMMAAttr::buildUnderlyingOperations(
   Value rhsScaleInput = inputs[kScaledMMAOperandRhsScale];
 
   // When repeats are present, reindex scale reads to account for preshuffled
-  // data in LDS.
+  // data in LDS. Intrinsic dimensions are derived from the expand_shape of
+  // the LDS memref inside reindexScaleRead, giving correct per-operand
+  // dimensions (intrinsicM/intrinsicK for LHS, intrinsicKo/intrinsicN for RHS).
   if (hasRepeats()) {
-    MMASingleSubgroupLayout lhsScaleLayout =
-        getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandLhsScale);
-    int64_t intrinsicM =
-        lhsScaleLayout.outer[0] * lhsScaleLayout.thread[0] *
-        lhsScaleLayout.element[0];
-    int64_t intrinsicK =
-        lhsScaleLayout.outer[1] * lhsScaleLayout.thread[1] *
-        lhsScaleLayout.element[1];
-
     lhsScaleInput = reindexScaleRead(builder, loc, lhsScaleInput,
-                                     intrinsicM, intrinsicK,
                                      getRepeatM(), getRepeatK());
-
-    MMASingleSubgroupLayout rhsScaleLayout =
-        getSingleSubgroupLayout(getIntrinsic(), kScaledMMAOperandRhsScale);
-    int64_t intrinsicN =
-        rhsScaleLayout.outer[1] * rhsScaleLayout.thread[1] *
-        rhsScaleLayout.element[1];
-    int64_t intrinsicKRhs =
-        rhsScaleLayout.outer[0] * rhsScaleLayout.thread[0] *
-        rhsScaleLayout.element[0];
-
     rhsScaleInput = reindexScaleRead(builder, loc, rhsScaleInput,
-                                     intrinsicN, intrinsicKRhs,
                                      getRepeatM(), getRepeatK());
   }
 

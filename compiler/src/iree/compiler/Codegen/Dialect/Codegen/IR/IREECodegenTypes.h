@@ -236,6 +236,10 @@ struct MaterializeEncodingInfo {
   std::optional<TileSwizzle> swizzle;
   // The optional scalable tiles array
   std::optional<ScalableTileFlags> scalableTiles;
+  // When true, the encoding represents a same-shape permutation (e.g. scale
+  // preshuffling). The materialized type keeps the original rank and shape;
+  // only element order changes via expand + transpose + collapse.
+  bool isSameShapePermutation = false;
 };
 
 } // namespace mlir::iree_compiler::IREE::Codegen

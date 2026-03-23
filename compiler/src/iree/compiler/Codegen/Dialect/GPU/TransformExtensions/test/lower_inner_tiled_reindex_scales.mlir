@@ -7,8 +7,9 @@
 // the flat memref, and emits a new transfer_read at reindexed coordinates.
 
 // Test 1: Constant indices, fully foldable.
+// expand_shape [16, 16, 2, 4] → intrinsicM=16, intrinsicK=4 (from expand_shape)
 // Original 4D position: [2, 5, 1, 2] → flat (m=37, k=6)
-// reindex(37, 6, R_m=2, R_k=2) → (43, 1)
+// reindex(37, 6, intrinsicM=16, intrinsicK=4, R_m=2, R_k=2) → (43, 1)
 
 #map5 = affine_map<() -> ()>
 
@@ -77,7 +78,8 @@ module attributes { transform.with_named_sequence } {
 //  CHECK-SAME:   %[[LDS_RHS_SCALE:[A-Za-z0-9]+]]: memref<256x8xf8E8M0FNU, #gpu.address_space<workgroup>>
 //
 //       Wide read: reinterpret_cast to 1D, read vector<4> from flat base, extract element.
-//       For constant indices [2, 5, 1, 2] with repeats=[2,2], the flat base is 345.
+//       Intrinsic dims derived from expand_shape [16,16,2,4]: intrinsicM=16,
+//       intrinsicK=4. With repeats=[2,2] the flat base is 345.
 //   CHECK-DAG:   %[[C345:.+]] = arith.constant 345 : index
 //       CHECK:   %[[FLAT1D:.+]] = memref.reinterpret_cast %[[LDS_LHS_SCALE]]
 //  CHECK-SAME:     memref<256x8xf8E8M0FNU, #gpu.address_space<workgroup>>

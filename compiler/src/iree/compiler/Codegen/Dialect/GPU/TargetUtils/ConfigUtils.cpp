@@ -982,29 +982,53 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     if (failed(lhsSwizzleAttr) || failed(rhsSwizzleAttr)) {
       promotionArray = {};
     } else {
-      // When scale repeats are active, XOR-swizzle the scale operands in
-      // LDS only if the resulting layout would cause bank conflicts.
-      Attribute scalePromoAttr = defaultConfigAttr;
+      // When scale repeats are active, XOR-swizzle each scale operand
+      // independently. The access width matches the per-operand numRepeats
+      // derived from tile configuration (same logic as reindexScaleRead).
+      Attribute lhsScalePromoAttr = defaultConfigAttr;
+      Attribute rhsScalePromoAttr = defaultConfigAttr;
       if (clScaleRepeats.size() == 2) {
         auto smma = cast<GPU::ScaledMMAAttr>(kind);
         int64_t scaleIntrinsicK = getKSize(smma.getIntrinsic());
         int64_t scaleKLds =
             reductionTileSizes[kDims.front()] * scaleIntrinsicK;
         Type scaleElemType = b.getF8E8M0Type();
+
+        // Compute per-operand repeat factors from tile configuration,
+        // matching the expand_shape derivation in reindexScaleRead.
+        int64_t mTiles = subgroupTileSizes[mDims.back()];
+        int64_t nTiles = subgroupTileSizes[nDims.back()];
+        int64_t kTiles = reductionTileSizes[kDims.front()];
+
+        constexpr int64_t kMaxScaleReadBytes = 16;
+        int64_t lhsRepeatM = std::min(mTiles,
+            std::max<int64_t>(1, kMaxScaleReadBytes / kTiles));
+        int64_t lhsNumRepeats = lhsRepeatM * kTiles;
+        int64_t rhsRepeatK = std::min(nTiles,
+            std::max<int64_t>(1, kMaxScaleReadBytes / kTiles));
+        int64_t rhsNumRepeats = kTiles * rhsRepeatK;
+
         if (hasBankConflicts(scaleKLds, scaleElemType, target)) {
-          int64_t numRepeats = clScaleRepeats[0] * clScaleRepeats[1];
           int64_t bitwidth = scaleElemType.getIntOrFloatBitWidth();
-          int64_t rowWidth =
-              getIdealXorRowWidth(numRepeats, scaleKLds, bitwidth, target);
-          auto scaleSwizzle = IREE::Codegen::XORShuffleAttr::get(
-              context, rowWidth, /*accessWidth=*/numRepeats,
+          int64_t lhsRowWidth = getIdealXorRowWidth(
+              lhsNumRepeats, scaleKLds, bitwidth, target);
+          auto lhsScaleSwizzle = IREE::Codegen::XORShuffleAttr::get(
+              context, lhsRowWidth, /*accessWidth=*/lhsNumRepeats,
               /*rowStride=*/int64_t(0), /*perPhase=*/int64_t(0));
-          scalePromoAttr = IREE::GPU::SwizzleOperandAttr::get(
-              context, defaultConfigAttr, scaleSwizzle);
+          lhsScalePromoAttr = IREE::GPU::SwizzleOperandAttr::get(
+              context, defaultConfigAttr, lhsScaleSwizzle);
+
+          int64_t rhsRowWidth = getIdealXorRowWidth(
+              rhsNumRepeats, scaleKLds, bitwidth, target);
+          auto rhsScaleSwizzle = IREE::Codegen::XORShuffleAttr::get(
+              context, rhsRowWidth, /*accessWidth=*/rhsNumRepeats,
+              /*rowStride=*/int64_t(0), /*perPhase=*/int64_t(0));
+          rhsScalePromoAttr = IREE::GPU::SwizzleOperandAttr::get(
+              context, defaultConfigAttr, rhsScaleSwizzle);
         }
       }
-      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, scalePromoAttr,
-                        scalePromoAttr};
+      promotionArray = {*lhsSwizzleAttr, *rhsSwizzleAttr, lhsScalePromoAttr,
+                        rhsScalePromoAttr};
     }
   }
   if ((!mustBeAligned || couldNeedPadding) && cPromoteIfPadding) {
