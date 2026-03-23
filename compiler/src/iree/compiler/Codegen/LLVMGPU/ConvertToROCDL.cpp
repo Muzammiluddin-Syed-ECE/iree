@@ -333,7 +333,6 @@ struct ConvertToROCDLPass final
           patterns, options.vectorTransposeLowering);
       vector::populateVectorTransferLoweringPatterns(patterns);
       // gfx950 and gfx12+ have native bf16 conversion (v_cvt_pk_bf16_f32).
-      // Let arith.truncf lower to fptrunc so the LLVM backend can use it.
       if (!(*maybeChipset == amdgpu::Chipset(9, 5, 0) ||
       *maybeChipset >= amdgpu::Chipset(12, 0, 0))) {
         arith::populateExpandBFloat16Patterns(patterns);
