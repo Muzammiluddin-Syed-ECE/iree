@@ -48,6 +48,8 @@ static llvm::cl::list<int64_t> clScaleRepeats(
                    "to ScaledMMAAttr for coalesced scale reads"),
     llvm::cl::CommaSeparated, llvm::cl::ZeroOrMore);
 
+extern llvm::cl::opt<bool> clGPUHybridScaleEncoding;
+
 namespace mlir::iree_compiler::IREE::GPU {
 
 constexpr int64_t kCacheLineSizeBits = 128 * 8;
@@ -79,6 +81,13 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
   auto dataTiledMmaAttr =
       dyn_cast<DataTiledMMAInterfaceAttr>(multiMmaOp.getKind());
   if (!dataTiledMmaAttr) {
+    return failure();
+  }
+
+  // Hybrid inner_tiled ops should be handled by setMatmulLoweringConfig,
+  // which applies regular tiling heuristics to the outer iteration space.
+  if (clGPUHybridScaleEncoding &&
+      isa<DataTiledScaledMMAAttr>(dataTiledMmaAttr)) {
     return failure();
   }
 
@@ -1189,11 +1198,212 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
                             workgroupSize, targetSubgroupSize, pipelineConfig));
 }
 
+/// Handle hybrid inner_tiled ops (from --iree-gpu-hybrid-scale-encoding).
+/// Reconstructs problem-dimension bounds from the outer iteration space and
+/// inner tile coverage, calls the standard matmul heuristic, then converts
+/// the tile sizes back to outer-dimension units.
+static LogicalResult setHybridInnerTiledLoweringConfig(
+    IREE::GPU::TargetAttr target, mlir::FunctionOpInterface entryPoint,
+    IREE::Codegen::InnerTiledOp innerTiledOp,
+    DataTiledScaledMMAAttr dataTiledMmaAttr,
+    std::optional<uint64_t> prefetchNumStages) {
+
+  LDBG() << "Hybrid Inner-Tiled Matmul TileAndFuse Config";
+
+  // Derive outer iteration bounds from TilingInterface.
+  OpBuilder builder(innerTiledOp);
+  SmallVector<Range> iterationDomain =
+      cast<TilingInterface>(innerTiledOp.getOperation())
+          .getIterationDomain(builder);
+  SmallVector<int64_t> outerBounds;
+  for (auto &range : iterationDomain) {
+    auto size = getConstantIntValue(range.size);
+    outerBounds.push_back(size ? *size : ShapedType::kDynamic);
+  }
+
+  SmallVector<AffineMap> maps = innerTiledOp.getIndexingMapsArray();
+  SmallVector<utils::IteratorType> iteratorTypes =
+      innerTiledOp.getIteratorTypesArray();
+  int64_t iterationRank = iteratorTypes.size();
+
+  auto tileMNKKb = dataTiledMmaAttr.getTileMNKKb();
+  int64_t intrinsicKB = getKbSize(dataTiledMmaAttr.getIntrinsic());
+  int64_t intrinsicK = getKSize(dataTiledMmaAttr.getIntrinsic());
+
+  FailureOr<IREE::LinalgExt::ScaledContractionDimensions> scaledDims =
+      IREE::LinalgExt::inferScaledContractionDims(maps);
+  if (failed(scaledDims) || scaledDims->m.empty() || scaledDims->n.empty() ||
+      scaledDims->k.empty()) {
+    return failure();
+  }
+
+  // Per-dimension coverage: how many problem-dimension elements each outer
+  // iteration covers.
+  // Note: getKSize gives the scale-group count per intrinsic (confusingly
+  // named "k"), and getKbSize gives the block size per group ("kB").
+  SmallVector<int64_t> dimCoverage(iterationRank, 1);
+  for (unsigned m : scaledDims->m)
+    dimCoverage[m] = tileMNKKb.M;
+  for (unsigned n : scaledDims->n)
+    dimCoverage[n] = tileMNKKb.N;
+  for (unsigned k : scaledDims->k)
+    dimCoverage[k] = intrinsicK * dataTiledMmaAttr.getIntrinsicsK() *
+                     dataTiledMmaAttr.getSubgroupsK();
+  for (unsigned kB : scaledDims->kB)
+    dimCoverage[kB] = intrinsicKB;
+
+  SmallVector<int64_t> problemBounds(iterationRank);
+  for (int64_t i = 0; i < iterationRank; ++i) {
+    problemBounds[i] = outerBounds[i] * dimCoverage[i];
+  }
+
+  LDBG() << "  outer bounds: " << llvm::interleaved_array(outerBounds);
+  LDBG() << "  dim coverage: " << llvm::interleaved_array(dimCoverage);
+  LDBG() << "  problem bounds: " << llvm::interleaved_array(problemBounds);
+
+  SmallVector<Value> operands;
+  for (Value in : innerTiledOp.getInputs())
+    operands.push_back(in);
+  for (Value out : innerTiledOp.getOutputs())
+    operands.push_back(out);
+
+  int64_t prefetchStages = prefetchNumStages.value_or(2);
+
+  FailureOr<std::pair<LoweringConfigAttr, int64_t>> configAndWgSize =
+      getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
+          problemBounds, maps, operands, target, /*isGemm=*/true,
+          /*scaled=*/true, /*useDirectLoad=*/false, prefetchStages,
+          /*splitReductionTripCnt=*/0, /*cPromoteIfPadding=*/false);
+  if (failed(configAndWgSize)) {
+    LDBG() << "  heuristic failed to produce a config";
+    return failure();
+  }
+
+  LoweringConfigAttr problemConfig = configAndWgSize->first;
+  int64_t flatWorkgroupSize = configAndWgSize->second;
+
+  LDBG() << "  problem config: " << problemConfig;
+  LDBG() << "  workgroup size: " << flatWorkgroupSize;
+
+  // Extract tile sizes from the problem-dimension config.
+  DictionaryAttr configDict = problemConfig.getAttributes();
+  auto extractI64Array = [](DictionaryAttr dict,
+                            StringRef key) -> SmallVector<int64_t> {
+    if (auto attr = dict.getAs<ArrayAttr>(key)) {
+      SmallVector<int64_t> result;
+      for (auto a : attr)
+        result.push_back(cast<IntegerAttr>(a).getInt());
+      return result;
+    }
+    return {};
+  };
+
+  SmallVector<int64_t> problemWorkgroup = extractI64Array(configDict, "workgroup");
+  SmallVector<int64_t> problemReduction = extractI64Array(configDict, "reduction");
+  SmallVector<int64_t> problemSubgroup = extractI64Array(configDict, "subgroup");
+
+  // Convert tile sizes from problem-dimension to outer-dimension units.
+  SmallVector<int64_t> outerWorkgroup(iterationRank, 0);
+  SmallVector<int64_t> outerReduction(iterationRank, 0);
+  SmallVector<int64_t> outerSubgroup(iterationRank, 0);
+
+  for (int64_t i = 0; i < iterationRank; ++i) {
+    int64_t cov = dimCoverage[i];
+    if (iteratorTypes[i] == utils::IteratorType::parallel) {
+      if (i < static_cast<int64_t>(problemWorkgroup.size()) &&
+          problemWorkgroup[i] > 0) {
+        outerWorkgroup[i] = std::max(int64_t{1}, problemWorkgroup[i] / cov);
+        outerWorkgroup[i] = std::min(outerWorkgroup[i], outerBounds[i]);
+      }
+      if (i < static_cast<int64_t>(problemSubgroup.size()) &&
+          problemSubgroup[i] > 0) {
+        // Subgroup tile sizes from the heuristic are in intrinsic-tile-count
+        // units. Convert to outer-tile units by dividing by the number of
+        // intrinsics per outer tile in this dimension.
+        int64_t intrinsicSize = 1;
+        if (llvm::is_contained(scaledDims->m, static_cast<unsigned>(i)))
+          intrinsicSize = dataTiledMmaAttr.getIntrinsicsM() *
+                          dataTiledMmaAttr.getSubgroupsM();
+        else if (llvm::is_contained(scaledDims->n, static_cast<unsigned>(i)))
+          intrinsicSize = dataTiledMmaAttr.getIntrinsicsN() *
+                          dataTiledMmaAttr.getSubgroupsN();
+        outerSubgroup[i] =
+            std::max(int64_t{1}, problemSubgroup[i] / intrinsicSize);
+        outerSubgroup[i] = std::min(outerSubgroup[i], outerBounds[i]);
+      }
+    } else {
+      if (i < static_cast<int64_t>(problemReduction.size()) &&
+          problemReduction[i] > 0) {
+        outerReduction[i] = std::max(int64_t{1}, problemReduction[i] / cov);
+        outerReduction[i] = std::min(outerReduction[i], outerBounds[i]);
+      }
+    }
+  }
+
+  LDBG() << "  outer workgroup: " << llvm::interleaved_array(outerWorkgroup);
+  LDBG() << "  outer reduction: " << llvm::interleaved_array(outerReduction);
+  LDBG() << "  outer subgroup:  " << llvm::interleaved_array(outerSubgroup);
+
+  MLIRContext *context = innerTiledOp.getContext();
+  Builder b(context);
+  SmallVector<NamedAttribute> attrs = {
+      {"workgroup", b.getI64ArrayAttr(outerWorkgroup)},
+      {"reduction", b.getI64ArrayAttr(outerReduction)},
+  };
+
+  bool hasSubgroup =
+      llvm::any_of(outerSubgroup, [](int64_t s) { return s > 0; });
+  if (hasSubgroup) {
+    attrs.emplace_back("subgroup", b.getI64ArrayAttr(outerSubgroup));
+  }
+
+  // Carry through the mma_kind selected by the heuristic.
+  if (auto mmaKind = getMmaKind(problemConfig)) {
+    setMmaKind(context, attrs, mmaKind);
+  }
+
+  GPU::appendPromotedOperandsList(context, attrs, {0, 1, 2, 3});
+
+  auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(
+      context, b.getDictionaryAttr(attrs));
+
+  SmallVector<NamedAttribute, 1> pipelineAttrs;
+  auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
+      context, /*prefetchNumStages=*/prefetchStages,
+      /*no_reduce_shared_memory_bank_conflicts=*/true,
+      /*use_igemm_convolution=*/false,
+      /*reorder_workgroups_strategy=*/std::nullopt);
+  pipelineAttrs.emplace_back(
+      IREE::GPU::GPUPipelineOptionsAttr::getDictKeyName(), pipelineOptions);
+  auto pipelineConfig = b.getDictionaryAttr(pipelineAttrs);
+
+  const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
+  std::array<int64_t, 3> workgroupSize = {flatWorkgroupSize, 1, 1};
+
+  return setOpConfigAndEntryPointFnTranslation(
+      entryPoint, innerTiledOp, loweringConfig,
+      getGPUTranslationInfo(context, LoweringPipeline::TileAndFuse,
+                            workgroupSize, targetSubgroupSize, pipelineConfig));
+}
+
 LogicalResult
 setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
                         mlir::FunctionOpInterface entryPoint, Operation *op,
                         bool useDirectLoad,
                         std::optional<uint64_t> prefetchNumStages) {
+  // Handle hybrid inner_tiled ops from --iree-gpu-hybrid-scale-encoding.
+  if (clGPUHybridScaleEncoding) {
+    if (auto innerTiledOp = dyn_cast<IREE::Codegen::InnerTiledOp>(op)) {
+      auto dataTiledMmaAttr =
+          dyn_cast<DataTiledScaledMMAAttr>(innerTiledOp.getKind());
+      if (dataTiledMmaAttr) {
+        return setHybridInnerTiledLoweringConfig(
+            target, entryPoint, innerTiledOp, dataTiledMmaAttr,
+            prefetchNumStages);
+      }
+    }
+  }
+
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp ||
       (!linalg::isaContractionOpInterface(linalgOp) &&

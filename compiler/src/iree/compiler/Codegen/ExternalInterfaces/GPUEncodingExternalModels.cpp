@@ -52,17 +52,12 @@
 #include <cstdint>
 #include <numeric>
 
-static llvm::cl::opt<bool> clGPUHybridScaleEncoding(
+llvm::cl::opt<bool> clGPUHybridScaleEncoding(
     "iree-gpu-hybrid-scale-encoding",
     llvm::cl::desc("Produce same-shape permutation encodings for scale "
                    "operands (preshuffling) instead of standard pack+swizzle"),
     llvm::cl::init(false));
 
-static llvm::cl::list<int64_t> clGPUHybridScaleRepeats(
-    "iree-gpu-hybrid-scale-repeats",
-    llvm::cl::desc("Override encoding resolver intrinsicsM,intrinsicsK with "
-                   "these repeat factors [R_m, R_k] for hybrid preshuffling"),
-    llvm::cl::CommaSeparated, llvm::cl::ZeroOrMore);
 
 #define DEBUG_TYPE "iree-codegen-materialize-encoding"
 
@@ -383,11 +378,9 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
         DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandLhsScale});
     scaledMmaInterleaveN =
         DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandRhsScale});
-    if (clGPUHybridScaleRepeats.size() == 2) {
-      intrinsicsM = clGPUHybridScaleRepeats[0];
-      intrinsicsN = clGPUHybridScaleRepeats[0];
-      intrinsicsK = clGPUHybridScaleRepeats[1];
-    }
+    intrinsicsM = 2;
+    intrinsicsN = 2;
+    intrinsicsK = 2;
   }
   auto intrinsicScaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
   return DataTiledScaledMMAAttr::get(
@@ -624,18 +617,6 @@ struct GPUEncodingPackedLayoutMaterializerAttr
     }
     info.swizzle = std::move(maybeSwizzle.value());
 
-    if (clGPUHybridScaleEncoding) {
-      int64_t opIndex = encoding.getOperandIndex().getInt();
-      if (opIndex == IREE::Encoding::SCALED_MATMUL_LHS_SCALES ||
-          opIndex == IREE::Encoding::SCALED_MATMUL_RHS_SCALES) {
-        info.isSameShapePermutation = true;
-      } else {
-        // Non-scale operands (data, ACC) get identity encoding in hybrid mode
-        // so convertType drops their encoding and materialization is a no-op.
-        return MaterializeEncodingInfo{};
-      }
-    }
-
     return info;
   }
 };
@@ -657,12 +638,6 @@ struct GPUEncodingResolverMaterializerAttr
     }
     if (linalg::isaContractionOpInterface(linalgOp) ||
         IREE::LinalgExt::isaScaledContractionOpInterface(linalgOp)) {
-      if (clGPUHybridScaleEncoding) {
-        // In hybrid mode, don't form inner_tiled. Clone the generic with
-        // converted (unencoded) operand/result types, preserving its
-        // contraction structure for the standard codegen path.
-        return clone(b, linalgOp, convertedResTypes, convertedOperands);
-      }
       return lowerContractionOrScaledContractionOpToInnerTiledOp(
           b, linalgOp, convertedOperands, resolverAttr);
     }
