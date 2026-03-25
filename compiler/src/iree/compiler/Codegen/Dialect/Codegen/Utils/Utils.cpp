@@ -325,11 +325,6 @@ DictionaryAttr serializeEncodingInfo(MLIRContext *ctx,
     items.emplace_back(b.getStringAttr("scalableTiles"),
                        b.getBoolArrayAttr(info.scalableTiles.value()));
   }
-  if (info.isSameShapePermutation) {
-    items.emplace_back(b.getStringAttr("isSameShapePermutation"),
-                       b.getBoolAttr(true));
-  }
-
   return b.getDictionaryAttr(items);
 }
 
@@ -372,18 +367,10 @@ deserializeEncodingInfo(DictionaryAttr attr) {
         [](Attribute a) { return cast<BoolAttr>(a).getValue(); });
     info.scalableTiles = std::move(res);
   }
-  if (attr.contains("isSameShapePermutation")) {
-    auto value = attr.getNamed("isSameShapePermutation");
-    if (value && isa<BoolAttr>(value->getValue()))
-      info.isSameShapePermutation = cast<BoolAttr>(value->getValue()).getValue();
-  }
-
   return info;
 }
 
 bool isIdentityLayout(const MaterializeEncodingInfo &info) {
-  if (info.isSameShapePermutation)
-    return false;
   return info.innerDimsPos.empty() && info.innerTileSizes.empty() &&
          info.outerDimsPerm.empty() && !info.swizzle && !info.scalableTiles;
 }
