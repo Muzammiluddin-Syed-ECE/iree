@@ -161,11 +161,20 @@ static void swizzleGatherToLDS(RewriterBase &rewriter,
 static LogicalResult
 verifyFlatContiguousSwizzleHintOp(IREE::Codegen::SwizzleHintOp hintOp) {
   auto memrefType = cast<MemRefType>(hintOp.getOperand().getType());
-  // Swizzle hints require flat (rank 1) memrefs.
-  // For rank 1, allow dynamic memrefs or static contiguous row-major memrefs.
-  if ((memrefType.getRank() != 1 || !memrefType.getLayout().isIdentity()) ||
-      (memrefType.hasStaticShape() &&
-       !memref::isStaticShapeAndContiguousRowMajor(memrefType))) {
+  if (memrefType.getRank() != 1) {
+    hintOp.emitError()
+        << "swizzle hint operand must be a rank-1 memref, got "
+        << hintOp.getOperand().getType();
+    return failure();
+  }
+  // Require unit stride (contiguous elements). Dynamic offset is acceptable
+  // because the XOR swizzle is applied to relative element indices within the
+  // buffer, not to the absolute address. This allows multi-buffered subviews
+  // (memref<N, strided<[1], offset: ?>>) to carry swizzle hints.
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(memrefType.getStridesAndOffset(strides, offset)) ||
+      strides.size() != 1 || strides[0] != 1) {
     hintOp.emitError()
         << "swizzle hint operand must be a contiguous flat memref, got "
         << hintOp.getOperand().getType();
