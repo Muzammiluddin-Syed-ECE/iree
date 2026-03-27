@@ -1199,9 +1199,28 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
 }
 
 /// Handle hybrid inner_tiled ops (from --iree-gpu-hybrid-scale-encoding).
-/// Reconstructs problem-dimension bounds from the outer iteration space and
-/// inner tile coverage, calls the standard matmul heuristic, then converts
-/// the tile sizes back to outer-dimension units.
+/// This path exists as a compromise between the data tiling path and the
+/// non data tiling path.
+///
+/// While the non-data tiling path provides greater control over tiling
+/// heuristics, shuffling scale data in separate dispatches is not supported.
+/// This is currently only supported by the data tiling path.
+///
+/// This path attempts to be the best of both worlds.
+///
+/// When the flag clGPUHybridScaleEncoding is set, data tiling proceeds
+/// as normal except with two exceptions:
+///
+/// 1. We use a hardcoded intrinsicsM, intrinsicsN, and intrinsicsK chosen for
+///    scaled gemms. This represents a minimal inner tile size required for obtaining
+///    wide loads from LDS.
+///
+/// 2. Force subgroupM and subgroupN to be 1 allowing custom subgroup
+///    selection.
+///
+/// These two changes allow us to intercept the data tiling path at
+/// LLVMGpuSelectLoweringStrategy and use the regular Matmul TileAndFuse and
+/// its heuristics for selecting the workgroup and subgroup sizes.
 static LogicalResult setHybridInnerTiledLoweringConfig(
     IREE::GPU::TargetAttr target, mlir::FunctionOpInterface entryPoint,
     IREE::Codegen::InnerTiledOp innerTiledOp,
@@ -1215,20 +1234,14 @@ static LogicalResult setHybridInnerTiledLoweringConfig(
   SmallVector<Range> iterationDomain =
       cast<TilingInterface>(innerTiledOp.getOperation())
           .getIterationDomain(builder);
-  SmallVector<int64_t> outerBounds;
+  SmallVector<int64_t> tileCounts;
   for (auto &range : iterationDomain) {
     auto size = getConstantIntValue(range.size);
-    outerBounds.push_back(size ? *size : ShapedType::kDynamic);
+    tileCounts.push_back(size ? *size : ShapedType::kDynamic);
   }
 
   SmallVector<AffineMap> maps = innerTiledOp.getIndexingMapsArray();
-  SmallVector<utils::IteratorType> iteratorTypes =
-      innerTiledOp.getIteratorTypesArray();
-  int64_t iterationRank = iteratorTypes.size();
-
-  auto tileMNKKb = dataTiledMmaAttr.getTileMNKKb();
-  int64_t intrinsicKB = getKbSize(dataTiledMmaAttr.getIntrinsic());
-  int64_t intrinsicK = getKSize(dataTiledMmaAttr.getIntrinsic());
+  int64_t iterationRank = innerTiledOp.getIteratorTypesArray().size();
 
   FailureOr<IREE::LinalgExt::ScaledContractionDimensions> scaledDims =
       IREE::LinalgExt::inferScaledContractionDims(maps);
@@ -1237,35 +1250,34 @@ static LogicalResult setHybridInnerTiledLoweringConfig(
     return failure();
   }
 
-  // Per-dimension coverage: how many problem-dimension elements each outer
-  // iteration covers.
-  // Note: getKSize gives the scale-group count per intrinsic (confusingly
-  // named "k"), and getKbSize gives the block size per group ("kB").
-  SmallVector<int64_t> dimCoverage(iterationRank, 1);
-  for (unsigned m : scaledDims->m)
-    dimCoverage[m] = tileMNKKb.M;
-  for (unsigned n : scaledDims->n)
-    dimCoverage[n] = tileMNKKb.N;
-  for (unsigned k : scaledDims->k)
-    dimCoverage[k] = intrinsicK * dataTiledMmaAttr.getIntrinsicsK() *
-                     dataTiledMmaAttr.getSubgroupsK();
-  for (unsigned kB : scaledDims->kB)
-    dimCoverage[kB] = intrinsicKB;
+  unsigned mIdx = scaledDims->m[0];
+  unsigned nIdx = scaledDims->n[0];
+  unsigned kIdx = scaledDims->k[0];
+  unsigned kbIdx = scaledDims->kB[0];
 
-  SmallVector<int64_t> problemBounds(iterationRank);
-  for (int64_t i = 0; i < iterationRank; ++i) {
-    problemBounds[i] = outerBounds[i] * dimCoverage[i];
+  if (ShapedType::isDynamic(tileCounts[mIdx]) ||
+      ShapedType::isDynamic(tileCounts[nIdx]) ||
+      ShapedType::isDynamic(tileCounts[kIdx])) {
+    LDBG() << "  dynamic outer bounds not supported";
+    return failure();
   }
 
-  LDBG() << "  outer bounds: " << llvm::interleaved_array(outerBounds);
-  LDBG() << "  dim coverage: " << llvm::interleaved_array(dimCoverage);
+  auto innerTileSize = dataTiledMmaAttr.getTileMNKKb();
+
+  SmallVector<int64_t> problemBounds(iterationRank, 0);
+  for (unsigned b : scaledDims->batch) {
+    problemBounds[b] = tileCounts[b];
+  }
+  problemBounds[mIdx] = tileCounts[mIdx] * innerTileSize.M;
+  problemBounds[nIdx] = tileCounts[nIdx] * innerTileSize.N;
+  problemBounds[kIdx] = tileCounts[kIdx] * innerTileSize.K;
+  problemBounds[kbIdx] = tileCounts[kbIdx] * innerTileSize.KB;
+
+  LDBG() << "  outer bounds: " << llvm::interleaved_array(tileCounts);
   LDBG() << "  problem bounds: " << llvm::interleaved_array(problemBounds);
 
-  SmallVector<Value> operands;
-  for (Value in : innerTiledOp.getInputs())
-    operands.push_back(in);
-  for (Value out : innerTiledOp.getOutputs())
-    operands.push_back(out);
+  SmallVector<Value> operands(innerTiledOp.getInputs());
+  llvm::append_range(operands, innerTiledOp.getOutputs());
 
   int64_t prefetchStages = prefetchNumStages.value_or(2);
 
@@ -1285,60 +1297,44 @@ static LogicalResult setHybridInnerTiledLoweringConfig(
   LDBG() << "  problem config: " << problemConfig;
   LDBG() << "  workgroup size: " << flatWorkgroupSize;
 
-  // Extract tile sizes from the problem-dimension config.
-  DictionaryAttr configDict = problemConfig.getAttributes();
-  auto extractI64Array = [](DictionaryAttr dict,
-                            StringRef key) -> SmallVector<int64_t> {
-    if (auto attr = dict.getAs<ArrayAttr>(key)) {
-      SmallVector<int64_t> result;
-      for (auto a : attr)
-        result.push_back(cast<IntegerAttr>(a).getInt());
-      return result;
-    }
-    return {};
+  SmallVector<int64_t> problemWorkgroup = problemConfig.getStaticTilingLevelSizes(
+      llvm::to_underlying(GPU::TilingLevel::Workgroup), nullptr);
+  SmallVector<int64_t> problemReduction = problemConfig.getStaticTilingLevelSizes(
+      llvm::to_underlying(GPU::TilingLevel::Reduction), nullptr);
+  SmallVector<int64_t> problemSubgroup = problemConfig.getStaticTilingLevelSizes(
+      llvm::to_underlying(GPU::TilingLevel::Subgroup), nullptr);
+
+  auto scaleDown = [](int64_t problemSize, int64_t divisor,
+                      int64_t bound) -> int64_t {
+    if (problemSize <= 0)
+      return 0;
+    return std::min(std::max(int64_t{1}, problemSize / divisor), bound);
   };
 
-  SmallVector<int64_t> problemWorkgroup = extractI64Array(configDict, "workgroup");
-  SmallVector<int64_t> problemReduction = extractI64Array(configDict, "reduction");
-  SmallVector<int64_t> problemSubgroup = extractI64Array(configDict, "subgroup");
-
-  // Convert tile sizes from problem-dimension to outer-dimension units.
   SmallVector<int64_t> outerWorkgroup(iterationRank, 0);
   SmallVector<int64_t> outerReduction(iterationRank, 0);
   SmallVector<int64_t> outerSubgroup(iterationRank, 0);
 
-  for (int64_t i = 0; i < iterationRank; ++i) {
-    int64_t cov = dimCoverage[i];
-    if (iteratorTypes[i] == utils::IteratorType::parallel) {
-      if (i < static_cast<int64_t>(problemWorkgroup.size()) &&
-          problemWorkgroup[i] > 0) {
-        outerWorkgroup[i] = std::max(int64_t{1}, problemWorkgroup[i] / cov);
-        outerWorkgroup[i] = std::min(outerWorkgroup[i], outerBounds[i]);
-      }
-      if (i < static_cast<int64_t>(problemSubgroup.size()) &&
-          problemSubgroup[i] > 0) {
-        // Subgroup tile sizes from the heuristic are in intrinsic-tile-count
-        // units. Convert to outer-tile units by dividing by the number of
-        // intrinsics per outer tile in this dimension.
-        int64_t intrinsicSize = 1;
-        if (llvm::is_contained(scaledDims->m, static_cast<unsigned>(i)))
-          intrinsicSize = dataTiledMmaAttr.getIntrinsicsM() *
-                          dataTiledMmaAttr.getSubgroupsM();
-        else if (llvm::is_contained(scaledDims->n, static_cast<unsigned>(i)))
-          intrinsicSize = dataTiledMmaAttr.getIntrinsicsN() *
-                          dataTiledMmaAttr.getSubgroupsN();
-        outerSubgroup[i] =
-            std::max(int64_t{1}, problemSubgroup[i] / intrinsicSize);
-        outerSubgroup[i] = std::min(outerSubgroup[i], outerBounds[i]);
-      }
-    } else {
-      if (i < static_cast<int64_t>(problemReduction.size()) &&
-          problemReduction[i] > 0) {
-        outerReduction[i] = std::max(int64_t{1}, problemReduction[i] / cov);
-        outerReduction[i] = std::min(outerReduction[i], outerBounds[i]);
-      }
-    }
-  }
+  for (unsigned b : scaledDims->batch)
+    outerWorkgroup[b] = scaleDown(problemWorkgroup[b], 1, tileCounts[b]);
+  outerWorkgroup[mIdx] =
+      scaleDown(problemWorkgroup[mIdx], innerTileSize.M, tileCounts[mIdx]);
+  outerWorkgroup[nIdx] =
+      scaleDown(problemWorkgroup[nIdx], innerTileSize.N, tileCounts[nIdx]);
+
+  int64_t mTileSize =
+      dataTiledMmaAttr.getIntrinsicsM() * dataTiledMmaAttr.getSubgroupsM();
+  int64_t nTileSize =
+      dataTiledMmaAttr.getIntrinsicsN() * dataTiledMmaAttr.getSubgroupsN();
+  outerSubgroup[mIdx] =
+      scaleDown(problemSubgroup[mIdx], mTileSize, tileCounts[mIdx]);
+  outerSubgroup[nIdx] =
+      scaleDown(problemSubgroup[nIdx], nTileSize, tileCounts[nIdx]);
+
+  outerReduction[kIdx] =
+      scaleDown(problemReduction[kIdx], innerTileSize.K, tileCounts[kIdx]);
+  outerReduction[kbIdx] =
+      scaleDown(problemReduction[kbIdx], innerTileSize.KB, tileCounts[kbIdx]);
 
   LDBG() << "  outer workgroup: " << llvm::interleaved_array(outerWorkgroup);
   LDBG() << "  outer reduction: " << llvm::interleaved_array(outerReduction);
