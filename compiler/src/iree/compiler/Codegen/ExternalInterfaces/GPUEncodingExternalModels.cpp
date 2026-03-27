@@ -381,6 +381,11 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
     intrinsicsM = 2;
     intrinsicsN = 2;
     intrinsicsK = 2;
+    // Force single-subgroup inner tiles so the outer tiling can freely assign
+    // tiles to individual hardware subgroups without conflicting with the
+    // inner tile's cross-subgroup distribution.
+    subgroupsM = 1;
+    subgroupsN = 1;
   }
   auto intrinsicScaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
   return DataTiledScaledMMAAttr::get(
