@@ -1065,6 +1065,28 @@ static Value flattenVector(OpBuilder &builder, Location loc, Value value) {
   return vector::ShapeCastOp::create(builder, loc, flatVectorType, value);
 }
 
+/// Extracts the n-th intrinsic-level fragment from a multi-intrinsic tile,
+/// where n indexes into the cross-intrinsic dimensions with the last dimension
+/// varying fastest (matching incrementIndices traversal order).
+static Value extractNthMmaFragment(OpBuilder &builder, Location loc,
+                                   Value value,
+                                   ArrayRef<int64_t> crossIntrinsicShape,
+                                   ArrayRef<int64_t> internalShape,
+                                   int64_t n) {
+  int rank = internalShape.size();
+  SmallVector<int64_t> indices(rank, 0);
+  SmallVector<int64_t> strides(rank, 1);
+  // Compute multi-dimensional index from linear index n.
+  int64_t remaining = n;
+  for (int i = rank - 1; i >= 0; --i) {
+    indices[i] = remaining % crossIntrinsicShape[i];
+    remaining /= crossIntrinsicShape[i];
+  }
+  Value extract = vector::ExtractStridedSliceOp::create(
+      builder, loc, value, indices, internalShape, strides);
+  return flattenVector(builder, loc, extract);
+}
+
 /// Returns intrinsic-level slices tiling the input multi-MMA-level tile
 /// `value`.
 static SmallVector<Value>
@@ -2285,57 +2307,80 @@ LogicalResult DataTiledScaledMMAAttr::buildUnderlyingOperations(
     return failure();
   }
 
-  // Prepare Lhs/Rhs/Acc operand slices to feed the intrinsic.
+  // Prepare operand swizzles.
   const unsigned lhsIdx = 0;
   const unsigned rhsIdx = 1;
   const unsigned lhsScalesIdx = 2;
   const unsigned rhsScalesIdx = 3;
   const unsigned accIdx = 4;
   TileSwizzle lhsSwizzle = getSwizzle(*this, lhsIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
-  LDBG() << "    lhsSwizzle: " << lhsSwizzle;
-  SmallVector<Value> intrinsicsLhs =
-      distributeMmaFragmentToIntrinsics(builder, loc, inputs[0], lhsSwizzle);
-
   TileSwizzle rhsSwizzle = getSwizzle(*this, rhsIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
-  LDBG() << "    rhsSwizzle: " << rhsSwizzle;
-  SmallVector<Value> intrinsicsRhs =
-      distributeMmaFragmentToIntrinsics(builder, loc, inputs[1], rhsSwizzle);
-
   TileSwizzle lhsScalesSwizzle = getSwizzle(*this, lhsScalesIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
-  LDBG() << "    lhsScalesSwizzle: " << lhsScalesSwizzle;
-  SmallVector<Value> intrinsicsLhsScales = distributeMmaFragmentToIntrinsics(
-      builder, loc, inputs[2], lhsScalesSwizzle);
-
   TileSwizzle rhsScalesSwizzle = getSwizzle(*this, rhsScalesIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
-  LDBG() << "    rhsScalesSwizzle: " << rhsScalesSwizzle;
-  SmallVector<Value> intrinsicsRhsScales = distributeMmaFragmentToIntrinsics(
-      builder, loc, inputs[3], rhsScalesSwizzle);
-
   TileSwizzle accSwizzle = getSwizzle(*this, accIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
-  LDBG() << "    accSwizzle: " << accSwizzle;
 
+  // Extract accumulator fragments upfront (independent of K, needed for
+  // chaining across K steps).
   SmallVector<Value> intrinsicsAcc =
       distributeMmaFragmentToIntrinsics(builder, loc, outputs[0], accSwizzle);
 
   ScaledMMAIntrinsic intrinsic = getIntrinsic();
   auto intrinCType = cast<VectorType>(intrinsicsAcc.front().getType());
 
-  // Loop over the 3 unroll_{m,n,k} dimensions to create the intrinsics.
-  for (int64_t mu = 0; mu < getIntrinsicsM(); ++mu) {
+  // Pre-compute shapes for per-fragment extraction.
+  auto lhsCIShape = Codegen::sliceSwizzledShape(lhsSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::CrossIntrinsic;
+  });
+  auto lhsIntShape = Codegen::sliceSwizzledShape(lhsSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::Internal;
+  });
+  auto rhsCIShape = Codegen::sliceSwizzledShape(rhsSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::CrossIntrinsic;
+  });
+  auto rhsIntShape = Codegen::sliceSwizzledShape(rhsSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::Internal;
+  });
+  auto lhsScCIShape = Codegen::sliceSwizzledShape(lhsScalesSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::CrossIntrinsic;
+  });
+  auto lhsScIntShape = Codegen::sliceSwizzledShape(lhsScalesSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::Internal;
+  });
+  auto rhsScCIShape = Codegen::sliceSwizzledShape(rhsScalesSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::CrossIntrinsic;
+  });
+  auto rhsScIntShape = Codegen::sliceSwizzledShape(rhsScalesSwizzle, [](auto d) {
+    return d.kind() == TileSwizzle::Dim::Kind::Internal;
+  });
+
+  // Defer K-related extractions: for each K step, extract only the data/scale
+  // fragments needed for that step, then compute the M×N MFMAs. This reduces
+  // peak register pressure by keeping K=1 data dead during K=0 computation.
+  for (int64_t ku = 0; ku < getIntrinsicsK(); ++ku) {
+    SmallVector<Value> kLhs(getIntrinsicsM());
+    SmallVector<Value> kRhs(getIntrinsicsN());
+    SmallVector<Value> kLhsScales(getIntrinsicsM());
+    SmallVector<Value> kRhsScales(getIntrinsicsN());
+    for (int64_t mu = 0; mu < getIntrinsicsM(); ++mu) {
+      int64_t n = mu * getIntrinsicsK() + ku;
+      kLhs[mu] = extractNthMmaFragment(builder, loc, inputs[0], lhsCIShape,
+                                        lhsIntShape, n);
+      kLhsScales[mu] = extractNthMmaFragment(builder, loc, inputs[2],
+                                              lhsScCIShape, lhsScIntShape, n);
+    }
     for (int64_t nu = 0; nu < getIntrinsicsN(); ++nu) {
-      for (int64_t ku = 0; ku < getIntrinsicsK(); ++ku) {
-        Value lhs = intrinsicsLhs[mu * getIntrinsicsK() + ku];
-        Value rhs = intrinsicsRhs[nu * getIntrinsicsK() + ku];
-        Value lhsScales = intrinsicsLhsScales[mu * getIntrinsicsK() + ku];
-        Value rhsScales = intrinsicsRhsScales[nu * getIntrinsicsK() + ku];
+      int64_t n = nu * getIntrinsicsK() + ku;
+      kRhs[nu] = extractNthMmaFragment(builder, loc, inputs[1], rhsCIShape,
+                                        rhsIntShape, n);
+      kRhsScales[nu] = extractNthMmaFragment(builder, loc, inputs[3],
+                                              rhsScCIShape, rhsScIntShape, n);
+    }
+    for (int64_t mu = 0; mu < getIntrinsicsM(); ++mu) {
+      for (int64_t nu = 0; nu < getIntrinsicsN(); ++nu) {
         Value &acc = intrinsicsAcc[mu * getIntrinsicsN() + nu];
-        acc = createScaledMmaOp(builder, loc, intrinsic, intrinCType, lhs, rhs,
-                                lhsScales, rhsScales, acc);
+        acc = createScaledMmaOp(builder, loc, intrinsic, intrinCType,
+                                kLhs[mu], kRhs[nu], kLhsScales[mu],
+                                kRhsScales[nu], acc);
       }
     }
   }
