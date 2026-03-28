@@ -386,9 +386,10 @@ void HoistEncodingOpsPass::runOnOperation() {
     }
   }
 
-  // In hybrid mode, non-scale encoding ops remain inside dispatches. The
-  // encoding resolver returns identity for non-scale operands so the
-  // materialization pass converts them to no-ops. No stripping needed here.
+  // In hybrid mode, non-scale encoding ops remain inside dispatches.
+  // MaterializeDeviceEncodings converts them to pack + expand_shape +
+  // transpose inline, and the pack/expand fold into buffer bindings while
+  // the transpose fuses into the load access pattern during codegen.
 
   RewritePatternSet cleanPatterns(ctx);
   memref::populateResolveRankedShapedTypeResultDimsPatterns(cleanPatterns);
