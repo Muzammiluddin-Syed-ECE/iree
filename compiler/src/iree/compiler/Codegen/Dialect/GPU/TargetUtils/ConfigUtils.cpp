@@ -925,6 +925,7 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
   // translation_info).
   SmallVector<Attribute> promotionArray;
   Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
+  // Attribute defaultConfig = IREE::GPU::DerivedThreadConfigAttr::get(context);
   if (useDirectLoad) {
     promotionArray = {useGlobalDma, useGlobalDma};
   }

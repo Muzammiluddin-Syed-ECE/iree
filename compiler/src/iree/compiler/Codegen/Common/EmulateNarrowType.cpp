@@ -14,7 +14,9 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/NarrowTypeEmulationConverter.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/Utils/MemRefUtils.h"
@@ -97,6 +99,45 @@ static void populateIreeNarrowTypeEmulationPatterns(
 }
 
 //===----------------------------------------------------------------------===//
+// FuncOp conversion (entry block + inner block arg types)
+//===----------------------------------------------------------------------===//
+
+// The default populateFunctionOpInterfaceTypeConversionPattern only converts
+// the entry block signature. Inner blocks (e.g., loop headers created by CF
+// lowering) may also have sub-byte block argument types that need conversion.
+struct ConvertFuncOpRegionTypes : public OpConversionPattern<func::FuncOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(func::FuncOp funcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    FunctionType funcType = funcOp.getFunctionType();
+
+    TypeConverter::SignatureConversion entryConversion(funcType.getNumInputs());
+    SmallVector<Type> newResults;
+    if (failed(getTypeConverter()->convertSignatureArgs(funcType.getInputs(),
+                                                        entryConversion)) ||
+        failed(
+            getTypeConverter()->convertTypes(funcType.getResults(), newResults)))
+      return failure();
+
+    auto newType = FunctionType::get(rewriter.getContext(),
+                                     entryConversion.getConvertedTypes(),
+                                     newResults);
+    rewriter.modifyOpInPlace(funcOp, [&] { funcOp.setType(newType); });
+
+    if (!funcOp.isExternal()) {
+      if (failed(rewriter.convertRegionTypes(&funcOp.getBody(),
+                                             *getTypeConverter(),
+                                             &entryConversion)))
+        return failure();
+    }
+
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Pass Definition
 //===----------------------------------------------------------------------===//
 
@@ -149,7 +190,14 @@ LogicalResult emulateNarrowType(
 
   ConversionTarget target(*ctx);
   target.addDynamicallyLegalOp<func::FuncOp>([&typeConverter](Operation *op) {
-    return typeConverter.isLegal(cast<func::FuncOp>(op).getFunctionType());
+    auto funcOp = cast<func::FuncOp>(op);
+    if (!typeConverter.isLegal(funcOp.getFunctionType()))
+      return false;
+    for (Block &block : funcOp.getBody())
+      for (Type argType : block.getArgumentTypes())
+        if (!typeConverter.isLegal(argType))
+          return false;
+    return true;
   });
   auto opLegalCallback = [&typeConverter](Operation *op) {
     return typeConverter.isLegal(op);
@@ -157,7 +205,8 @@ LogicalResult emulateNarrowType(
   target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp>(opLegalCallback);
   target.addDynamicallyLegalDialect<
       arith::ArithDialect, vector::VectorDialect, memref::MemRefDialect,
-      affine::AffineDialect, IREE::HAL::HALDialect>(opLegalCallback);
+      affine::AffineDialect, cf::ControlFlowDialect,
+      IREE::HAL::HALDialect>(opLegalCallback);
 
   RewritePatternSet patterns(ctx);
 
@@ -173,6 +222,8 @@ LogicalResult emulateNarrowType(
                                                     disableAtomicRMW,
                                                     /*assumeAligned=*/true);
   populateIreeNarrowTypeEmulationPatterns(typeConverter, patterns);
+  populateBranchOpInterfaceTypeConversionPattern(patterns, typeConverter);
+  patterns.add<ConvertFuncOpRegionTypes>(typeConverter, ctx, /*benefit=*/2);
   if (populateCallback) {
     populateCallback.value()(typeConverter, patterns, target);
   }

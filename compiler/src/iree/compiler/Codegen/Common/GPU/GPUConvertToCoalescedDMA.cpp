@@ -102,6 +102,7 @@ static bool tracesToTensorEmpty(Value value) {
   // Direct tensor.empty.
   if (value.getDefiningOp<tensor::EmptyOp>()) {
     return true;
+  }
 
   if (auto expandOp = value.getDefiningOp<tensor::ExpandShapeOp>())
     return tracesToTensorEmpty(expandOp.getSrc());
