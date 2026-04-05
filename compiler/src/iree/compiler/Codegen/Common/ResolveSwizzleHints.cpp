@@ -10,7 +10,9 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Utils/MemRefUtils.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
@@ -158,6 +160,197 @@ static void swizzleGatherToLDS(RewriterBase &rewriter,
   });
 }
 
+/// Transitively walk users of |startVal| through view-like ops
+/// (expand_shape, collapse_shape, subview, cast) and scf.for iter_args to
+/// collect all vector.load / vector.store operations that ultimately read/write
+/// the swizzle-hinted memory. This enables swizzle resolution for loads that
+/// are not direct users of the swizzle_hint due to intervening reshape or
+/// loop-carried argument chains.
+static void collectTransitiveSwizzleableUsers(
+    Value startVal, int64_t accessWidth,
+    SmallVectorImpl<vector::LoadOp> &loads,
+    SmallVectorImpl<vector::StoreOp> &stores) {
+  SmallVector<Value> worklist = {startVal};
+  DenseSet<Value> visited;
+
+  while (!worklist.empty()) {
+    Value current = worklist.pop_back_val();
+    if (!visited.insert(current).second)
+      continue;
+
+    for (Operation *user : current.getUsers()) {
+      if (auto load = dyn_cast<vector::LoadOp>(user)) {
+        VectorType vt = load.getVectorType();
+        if (vt.getRank() == 1 && vt.getShape()[0] % accessWidth == 0)
+          loads.push_back(load);
+        continue;
+      }
+      if (auto store = dyn_cast<vector::StoreOp>(user)) {
+        VectorType vt = store.getVectorType();
+        if (vt.getRank() == 1 && vt.getShape()[0] % accessWidth == 0)
+          stores.push_back(store);
+        continue;
+      }
+      if (auto op = dyn_cast<memref::ExpandShapeOp>(user)) {
+        worklist.push_back(op.getResult());
+        continue;
+      }
+      if (auto op = dyn_cast<memref::CollapseShapeOp>(user)) {
+        worklist.push_back(op.getResult());
+        continue;
+      }
+      if (auto op = dyn_cast<memref::SubViewOp>(user)) {
+        worklist.push_back(op.getResult());
+        continue;
+      }
+      if (auto op = dyn_cast<memref::CastOp>(user)) {
+        worklist.push_back(op.getResult());
+        continue;
+      }
+      if (auto forOp = dyn_cast<scf::ForOp>(user)) {
+        for (auto [initArg, regionArg] :
+             llvm::zip(forOp.getInitArgs(), forOp.getRegionIterArgs())) {
+          if (initArg == current)
+            worklist.push_back(regionArg);
+        }
+        continue;
+      }
+      if (auto yieldOp = dyn_cast<scf::YieldOp>(user)) {
+        if (auto forOp = dyn_cast<scf::ForOp>(yieldOp->getParentOp())) {
+          for (auto [idx, yielded] :
+               llvm::enumerate(yieldOp.getOperands())) {
+            if (yielded == current)
+              worklist.push_back(forOp.getResult(idx));
+          }
+        }
+        continue;
+      }
+      // gather_to_lds, barriers, deallocs, etc.: don't trace through.
+    }
+  }
+}
+
+/// Compute the "linearization basis" from a memref's static strides.
+/// For strides [s0, s1, ..., s_{n-1}] with s_{n-1} == 1, the basis is:
+///   basis[i] = strides[i-1] / strides[i]   for i in [1, rank)
+///   basis[0] = shape[0]                     (outer bound)
+/// This basis satisfies: linearize(indices, basis) == sum(idx_i * stride_i).
+static std::optional<SmallVector<int64_t>>
+computeLinearizationBasis(MemRefType type) {
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(type.getStridesAndOffset(strides, offset)))
+    return std::nullopt;
+  int64_t rank = type.getRank();
+  if (rank < 2 || strides.back() != 1)
+    return std::nullopt;
+  for (int64_t i = 0; i < rank - 1; ++i) {
+    if (strides[i] == ShapedType::kDynamic ||
+        strides[i + 1] == ShapedType::kDynamic)
+      return std::nullopt;
+    if (strides[i] % strides[i + 1] != 0)
+      return std::nullopt;
+  }
+  SmallVector<int64_t> basis(rank);
+  for (int64_t i = rank - 1; i >= 1; --i)
+    basis[i] = strides[i - 1] / strides[i];
+  basis[0] = type.getShape()[0];
+  if (basis[0] == ShapedType::kDynamic)
+    return std::nullopt;
+  return basis;
+}
+
+/// Swizzle an N-D vector.load by:
+///   1. Linearizing its indices to a flat element offset
+///   2. Applying the XOR swizzle in accessWidth-sized chunks
+///   3. Delinearizing the swizzled offset back to N-D indices
+///   4. Replacing the original load with sub-loads at swizzled positions
+static void swizzleNDLoad(RewriterBase &rewriter, vector::LoadOp load,
+                          IREE::Codegen::SwizzleHintOp hintOp) {
+  MemRefType memrefType = cast<MemRefType>(load.getBase().getType());
+  if (memrefType.getRank() <= 1)
+    return;
+
+  auto maybeBasis = computeLinearizationBasis(memrefType);
+  if (!maybeBasis)
+    return;
+  SmallVector<int64_t> basis = *maybeBasis;
+
+  Location loc = load.getLoc();
+  int64_t accessWidth = hintOp.getSwizzle().getAccessElementCount();
+  VectorType loadType = load.getVectorType();
+  int64_t loadWidth = loadType.getShape()[0];
+  VectorType chunkType =
+      VectorType::get({accessWidth}, loadType.getElementType());
+
+  // Linearize the N-D indices to a flat element offset.
+  Value flatOffset = affine::AffineLinearizeIndexOp::create(
+      rewriter, loc, load.getIndices(), basis, /*disjoint=*/true);
+
+  Value replacement = arith::ConstantOp::create(rewriter, loc, loadType,
+                                                rewriter.getZeroAttr(loadType));
+
+  for (int64_t i = 0; i < loadWidth; i += accessWidth) {
+    Value chunkBase = createOrFoldNewStaticAdd(rewriter, flatOffset, i);
+
+    Value swizzledFlat = getValueOrCreateConstantIndexOp(
+        rewriter, loc,
+        hintOp.getSwizzle().swizzleOffset(rewriter, loc, chunkBase,
+                                          hintOp.getOperand()));
+
+    auto delinOp = affine::AffineDelinearizeIndexOp::create(
+        rewriter, loc, swizzledFlat, basis, /*hasOuterBound=*/true);
+
+    auto subLoad = vector::LoadOp::create(rewriter, loc, chunkType,
+                                          load.getBase(),
+                                          delinOp.getResults());
+    replacement = vector::InsertStridedSliceOp::create(
+        rewriter, loc, subLoad, replacement, ArrayRef<int64_t>{i},
+        ArrayRef<int64_t>{1});
+  }
+  rewriter.replaceOp(load, replacement);
+}
+
+/// Swizzle an N-D vector.store (symmetric to swizzleNDLoad).
+static void swizzleNDStore(RewriterBase &rewriter, vector::StoreOp store,
+                           IREE::Codegen::SwizzleHintOp hintOp) {
+  MemRefType memrefType = cast<MemRefType>(store.getBase().getType());
+  if (memrefType.getRank() <= 1)
+    return;
+
+  auto maybeBasis = computeLinearizationBasis(memrefType);
+  if (!maybeBasis)
+    return;
+  SmallVector<int64_t> basis = *maybeBasis;
+
+  Location loc = store.getLoc();
+  int64_t accessWidth = hintOp.getSwizzle().getAccessElementCount();
+  VectorType storeType = store.getVectorType();
+  int64_t storeWidth = storeType.getShape()[0];
+
+  Value flatOffset = affine::AffineLinearizeIndexOp::create(
+      rewriter, loc, store.getIndices(), basis, /*disjoint=*/true);
+
+  for (int64_t i = 0; i < storeWidth; i += accessWidth) {
+    Value subVec = vector::ExtractStridedSliceOp::create(
+        rewriter, loc, store.getValueToStore(), ArrayRef<int64_t>{i},
+        ArrayRef<int64_t>{accessWidth}, ArrayRef<int64_t>{1});
+    Value chunkBase = createOrFoldNewStaticAdd(rewriter, flatOffset, i);
+
+    Value swizzledFlat = getValueOrCreateConstantIndexOp(
+        rewriter, loc,
+        hintOp.getSwizzle().swizzleOffset(rewriter, loc, chunkBase,
+                                          hintOp.getOperand()));
+
+    auto delinOp = affine::AffineDelinearizeIndexOp::create(
+        rewriter, loc, swizzledFlat, basis, /*hasOuterBound=*/true);
+
+    vector::StoreOp::create(rewriter, loc, subVec, store.getBase(),
+                            delinOp.getResults());
+  }
+  rewriter.eraseOp(store);
+}
+
 static LogicalResult
 verifyFlatContiguousSwizzleHintOp(IREE::Codegen::SwizzleHintOp hintOp) {
   auto memrefType = cast<MemRefType>(hintOp.getOperand().getType());
@@ -183,19 +376,23 @@ verifyFlatContiguousSwizzleHintOp(IREE::Codegen::SwizzleHintOp hintOp) {
   return success();
 }
 
-/// Resolves all hints. Walks all direct users and splits them into loads and
-/// stores. If any user is not a swizzle-able load or store, bail out and
-/// silently drop the optimization hint.
+/// Resolves all hints. Walks all direct users and splits them into loads,
+/// stores, and gather_to_lds ops. For view-like users (expand_shape,
+/// collapse_shape), transitively traces through to find N-D loads/stores that
+/// need swizzling (e.g., through scf.for iter_args in double-buffered loops).
+/// If any direct user is not a supported type, bail out and silently drop the
+/// optimization hint.
 static void resolveHintOp(RewriterBase &rewriter,
                           IREE::Codegen::SwizzleHintOp hintOp) {
   SmallVector<vector::LoadOp> loads;
   SmallVector<vector::StoreOp> stores;
   SmallVector<amdgpu::GatherToLDSOp> gatherToLDSOps;
+  SmallVector<vector::LoadOp> transitiveLoads;
+  SmallVector<vector::StoreOp> transitiveStores;
   int64_t accessWidth = hintOp.getSwizzle().getAccessElementCount();
   for (Operation *user : hintOp->getUsers()) {
     if (auto load = dyn_cast<vector::LoadOp>(user)) {
       VectorType loadType = load.getVectorType();
-      // Guard on zero rank loads and loads not divisible by the access width.
       if (loadType.getRank() != 1 ||
           loadType.getShape()[0] % accessWidth != 0) {
         return;
@@ -205,7 +402,6 @@ static void resolveHintOp(RewriterBase &rewriter,
     }
     if (auto store = dyn_cast<vector::StoreOp>(user)) {
       VectorType storeType = store.getVectorType();
-      // Guard on zero rank stores and stores not divisible by the access width.
       if (storeType.getRank() != 1 ||
           storeType.getShape()[0] % accessWidth != 0) {
         return;
@@ -214,8 +410,6 @@ static void resolveHintOp(RewriterBase &rewriter,
       continue;
     }
     if (auto gatherToLDSOp = dyn_cast<amdgpu::GatherToLDSOp>(user)) {
-      // Ignore swizzleHint on Dst Operand. Gather_to_lds writes elements of a
-      // subgroup contiguously in order of lane ID.
       if (gatherToLDSOp.getDst() == hintOp) {
         continue;
       }
@@ -236,15 +430,18 @@ static void resolveHintOp(RewriterBase &rewriter,
       gatherToLDSOps.push_back(gatherToLDSOp);
       continue;
     }
-    // View-like ops (e.g. expand_shape from FlattenSwizzleHintAllocs) are
-    // pass-through: replaceAllUsesWith at the end unwraps the hint for them.
+    // View-like ops from FlattenSwizzleHintAllocs: trace through to find
+    // transitive load/store users (possibly through scf.for iter_args).
     if (isa<memref::ExpandShapeOp, memref::CollapseShapeOp>(user)) {
+      collectTransitiveSwizzleableUsers(user->getResult(0), accessWidth,
+                                        transitiveLoads, transitiveStores);
       continue;
     }
     hintOp.emitError() << "unsupported SwizzleHintOp user: " << user;
     return;
   }
 
+  // Swizzle direct 1-D users.
   for (vector::LoadOp load : loads) {
     rewriter.setInsertionPoint(load);
     swizzleLoad(rewriter, load, hintOp);
@@ -256,6 +453,16 @@ static void resolveHintOp(RewriterBase &rewriter,
   for (amdgpu::GatherToLDSOp gatherToLDSOp : gatherToLDSOps) {
     rewriter.setInsertionPoint(gatherToLDSOp);
     swizzleGatherToLDS(rewriter, gatherToLDSOp, hintOp);
+  }
+
+  // Swizzle transitive N-D users found through expand_shape/scf.for chains.
+  for (vector::LoadOp load : transitiveLoads) {
+    rewriter.setInsertionPoint(load);
+    swizzleNDLoad(rewriter, load, hintOp);
+  }
+  for (vector::StoreOp store : transitiveStores) {
+    rewriter.setInsertionPoint(store);
+    swizzleNDStore(rewriter, store, hintOp);
   }
 }
 
