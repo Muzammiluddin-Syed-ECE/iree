@@ -835,6 +835,10 @@ getSingleSubgroupLayout(IREE::Codegen::InnerTileDescAttrInterface mmaKind,
         smmaAttr.getIntrinsic(), operandIndex,
         operandIndex == kScaledMMAOperandAcc && smmaAttr.getColMajor());
   }
+  if (auto pdtsmma = dyn_cast<PartialDataTiledScaledMMAAttr>(mmaKind)) {
+    return IREE::GPU::getSingleSubgroupLayout(pdtsmma.getIntrinsic(),
+                                              operandIndex);
+  }
   assert(false && "unhandled MMA Interface type.");
   return {};
 }
@@ -2963,10 +2967,28 @@ LogicalResult PartialDataTiledScaledMMAAttr::populateOperandOffsetsSizesStrides(
   // from the standard permutation, which breaks the thread-to-data mapping
   // when using the generic delinearize-by-distribution-shape approach.
   //
-  // Instead, we use the intrinsic's tstrides-based delinearization (same
-  // as ScaledMMAAttr) and map the resulting per-logical-dim virtual thread
-  // IDs directly onto the expanded shape's CrossThread positions.
+  // Instead, we use the intrinsic's tstrides-based delinearization for the
+  // within-subgroup thread mapping, and explicit subgroup ID decomposition
+  // for subgroup-level CrossThread dims.
   // ------------------------------------------------------------------ //
+
+  int64_t subgroupSize = getSubgroupSize();
+  Value laneIdVal = getValueOrCreateConstantIndexOp(builder, loc, laneId);
+  Value subgroupSizeVal =
+      arith::ConstantIndexOp::create(builder, loc, subgroupSize);
+  Value withinSubgroupId =
+      arith::RemUIOp::create(builder, loc, laneIdVal, subgroupSizeVal);
+  Value subgroupId =
+      arith::DivUIOp::create(builder, loc, laneIdVal, subgroupSizeVal);
+
+  // Decompose subgroupId into (sgM, sgN).
+  // Linearization: subgroupId = sgM * subgroupsN + sgN.
+  int64_t sgN = getSubgroupsN();
+  Value sgNVal = arith::ConstantIndexOp::create(builder, loc, sgN);
+  Value subgroupM =
+      arith::DivUIOp::create(builder, loc, subgroupId, sgNVal);
+  Value subgroupN =
+      arith::RemUIOp::create(builder, loc, subgroupId, sgNVal);
 
   MMASingleSubgroupLayout layout =
       getSingleSubgroupLayout(getIntrinsic(), operandIndex);
@@ -2992,13 +3014,32 @@ LogicalResult PartialDataTiledScaledMMAAttr::populateOperandOffsetsSizesStrides(
     return failure();
   }
   auto splitLaneId = affine::AffineDelinearizeIndexOp::create(
-      builder, loc, laneId, vtidBasis, /*hasOuterBound=*/false);
+      builder, loc, withinSubgroupId, vtidBasis, /*hasOuterBound=*/false);
 
   size_t numSrcDims = layout.thread.size();
   SmallVector<Value> vtids(numSrcDims);
   for (size_t d = 0; d < numSrcDims; ++d) {
     vtids[d] = splitLaneId.getResult(dimToVtid[d]);
   }
+
+  // Pick the subgroup position for this operand's parallel dimension.
+  // LHS parallel dim is M → use subgroupM. RHS parallel dim is N → use
+  // subgroupN (source 0 after rotation).
+  Value sgParallel = (operandIndex == kScaledMMAOperandLhs) ? subgroupM
+                                                           : subgroupN;
+
+  // The parallel source dimension (srcIdx=0) contains a subgroup-level
+  // CrossThread dim when subgroupsM/N > 1. It is always the outermost
+  // (first) CrossThread dim in that group because expand() prepends and
+  // the subgroup expansion is the last call in getSwizzleImpl.
+  // We cannot rely on distributionFactor() to identify it because
+  // getSwizzleImpl only sets a non-default distributionFactor for LHS,
+  // not for RHS.
+  constexpr int parallelSrcIdx = 0;
+  int64_t parallelSubgroups = (operandIndex == kScaledMMAOperandLhs)
+                                  ? getSubgroupsM()
+                                  : getSubgroupsN();
+  bool subgroupDimHandled = (parallelSubgroups <= 1);
 
   OpFoldResult zero = builder.getIndexAttr(0);
   SmallVector<OpFoldResult> tileOffsets;
@@ -3012,7 +3053,13 @@ LogicalResult PartialDataTiledScaledMMAAttr::populateOperandOffsetsSizesStrides(
         tileSizes.push_back(builder.getIndexAttr(d.size()));
         break;
       case TileSwizzle::Dim::Kind::CrossThread:
-        tileOffsets.push_back(vtids[srcIdx]);
+        if (static_cast<int>(srcIdx) == parallelSrcIdx &&
+            !subgroupDimHandled) {
+          tileOffsets.push_back(sgParallel);
+          subgroupDimHandled = true;
+        } else {
+          tileOffsets.push_back(vtids[srcIdx]);
+        }
         tileSizes.push_back(builder.getIndexAttr(1));
         break;
       case TileSwizzle::Dim::Kind::Internal:

@@ -373,11 +373,11 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   auto intrinsicScaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
 
   if (clPartialDTScaledMMA) {
-    intrinsicsM = 2;
-    intrinsicsN = 2;
+    intrinsicsM = 8;
+    intrinsicsN = 4;
     intrinsicsK = 2;
-    subgroupsM = 1;
-    subgroupsN = 1;
+    subgroupsM = 2;
+    subgroupsN = 4;
     subgroupsK = 1;
     auto scaledMmaInterleaveM =
         DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandLhsScale});
