@@ -2898,80 +2898,19 @@ LogicalResult PartialDataTiledScaledMMAAttr::populateOperandOffsetsSizesStrides(
     ArrayRef<int64_t> permutation, SmallVectorImpl<OpFoldResult> &offsets,
     SmallVectorImpl<OpFoldResult> &sizes,
     SmallVectorImpl<OpFoldResult> &strides) const {
-  TileSwizzle swizzle = getTileSwizzle(operandIndex);
 
+  // Scale operands are handled by the generic swizzle-based approach.
+  TileSwizzle swizzle = getTileSwizzle(operandIndex);
   bool isDataOperand = (operandIndex == kScaledMMAOperandLhs ||
                         operandIndex == kScaledMMAOperandRhs);
-
   if (!isDataOperand) {
-    // Scale and accumulator operands use the standard swizzle-based
-    // distribution, identical to DataTiledMMAInterfaceAttr's default. We
-    // reproduce the logic here because calling the interface method would
-    // dispatch back to this override.
-    SmallVector<int64_t> distributionThreadSizes;
-    for (const auto &group : swizzle.expandShape()) {
-      for (TileSwizzle::Dim d : group) {
-        distributionThreadSizes.push_back(
-            d.kind() == TileSwizzle::Dim::Kind::CrossThread
-                ? d.distributionFactor() * d.size()
-                : 1);
-      }
-    }
-    applyPermutationToVector(distributionThreadSizes, swizzle.permutation());
-
-    SmallVector<OpFoldResult> tileOffsets =
-        affine::AffineDelinearizeIndexOp::create(
-            builder, loc,
-            getValueOrCreateConstantIndexOp(builder, loc, laneId),
-            distributionThreadSizes, /*hasOuterBound=*/false)
-            ->getResults()
-            .drop_front();
-
-    SmallVector<int64_t> layoutThreadSizes =
-        Codegen::sliceSwizzledShape(swizzle, [](TileSwizzle::Dim d) {
-          return d.kind() == TileSwizzle::Dim::Kind::CrossThread;
-        });
-    for (auto [offset, threadSize, distributionSize] : llvm::zip_equal(
-             tileOffsets, layoutThreadSizes, distributionThreadSizes)) {
-      if (distributionSize == threadSize)
-        continue;
-      Value divisor = arith::ConstantIndexOp::create(
-          builder, loc, llvm::divideCeil(distributionSize, threadSize));
-      Value offsetVal =
-          getValueOrCreateConstantIndexOp(builder, loc, offset);
-      offset = arith::DivUIOp::create(builder, loc, offsetVal, divisor)
-                   .getResult();
-    }
-
-    MLIRContext *ctx = builder.getContext();
-    SmallVector<OpFoldResult> tileSizes = getAsIndexOpFoldResult(
-        ctx, Codegen::sliceSwizzledShape(swizzle, [](TileSwizzle::Dim d) {
-          return d.kind() != TileSwizzle::Dim::Kind::CrossThread;
-        }));
-    SmallVector<OpFoldResult> tileStrides(tileSizes.size(),
-                                          builder.getIndexAttr(1));
-
-    tileOffsets.assign(applyPermutation(tileOffsets, permutation));
-    tileSizes.assign(applyPermutation(tileSizes, permutation));
-
-    offsets.append(tileOffsets);
-    sizes.append(tileSizes);
-    strides.append(tileStrides);
-    return success();
+    return populateSwizzleBasedOffsetsSizesStrides(
+        builder, loc, swizzle, laneId, permutation, offsets, sizes, strides);
   }
 
-  // ------------------------------------------------------------------ //
-  // Data operands (LHS / RHS).
-  //
-  // The identity-permuted swizzle reorders CrossThread dims differently
-  // from the standard permutation, which breaks the thread-to-data mapping
-  // when using the generic delinearize-by-distribution-shape approach.
-  //
-  // Instead, we use the intrinsic's tstrides-based delinearization for the
-  // within-subgroup thread mapping, and explicit subgroup ID decomposition
-  // for subgroup-level CrossThread dims.
-  // ------------------------------------------------------------------ //
-
+  // Data operands must be manually handled because unlike the fully data-tiled
+  // case, the fastest moving dimensions haven't been permuted to be the
+  // innermost dimensions. So set the offsets and sizes manually.
   int64_t subgroupSize = getSubgroupSize();
   Value laneIdVal = getValueOrCreateConstantIndexOp(builder, loc, laneId);
   Value subgroupSizeVal =
@@ -3022,60 +2961,48 @@ LogicalResult PartialDataTiledScaledMMAAttr::populateOperandOffsetsSizesStrides(
     vtids[d] = splitLaneId.getResult(dimToVtid[d]);
   }
 
-  // Pick the subgroup position for this operand's parallel dimension.
-  // LHS parallel dim is M → use subgroupM. RHS parallel dim is N → use
-  // subgroupN (source 0 after rotation).
   Value sgParallel = (operandIndex == kScaledMMAOperandLhs) ? subgroupM
                                                            : subgroupN;
 
-  // The parallel source dimension (srcIdx=0) contains a subgroup-level
-  // CrossThread dim when subgroupsM/N > 1. It is always the outermost
-  // (first) CrossThread dim in that group because expand() prepends and
-  // the subgroup expansion is the last call in getSwizzleImpl.
-  // We cannot rely on distributionFactor() to identify it because
-  // getSwizzleImpl only sets a non-default distributionFactor for LHS,
-  // not for RHS.
-  constexpr int parallelSrcIdx = 0;
+  // If we have distribution across subgroups, then there will be 
+  // an additional CrossThread dimension in the first index of the first group.
+  // The offset for this dimension will be the subgroup ID.
   int64_t parallelSubgroups = (operandIndex == kScaledMMAOperandLhs)
                                   ? getSubgroupsM()
                                   : getSubgroupsN();
-  bool subgroupDimHandled = (parallelSubgroups <= 1);
+  bool distributeAcrossSubgroups = (parallelSubgroups > 1);
 
   OpFoldResult zero = builder.getIndexAttr(0);
+  OpFoldResult one = builder.getIndexAttr(1);
   SmallVector<OpFoldResult> tileOffsets;
   SmallVector<OpFoldResult> tileSizes;
-
   for (auto [srcIdx, group] : llvm::enumerate(swizzle.expandShape())) {
     for (TileSwizzle::Dim d : group) {
+      OpFoldResult tileOffset = zero;
+      OpFoldResult tileSize = one;
       switch (d.kind()) {
+      case TileSwizzle::Dim::Kind::Internal:
       case TileSwizzle::Dim::Kind::CrossIntrinsic:
-        tileOffsets.push_back(zero);
-        tileSizes.push_back(builder.getIndexAttr(d.size()));
+        tileSize = builder.getIndexAttr(d.size());
         break;
       case TileSwizzle::Dim::Kind::CrossThread:
-        if (static_cast<int>(srcIdx) == parallelSrcIdx &&
-            !subgroupDimHandled) {
-          tileOffsets.push_back(sgParallel);
-          subgroupDimHandled = true;
-        } else {
-          tileOffsets.push_back(vtids[srcIdx]);
-        }
-        tileSizes.push_back(builder.getIndexAttr(1));
-        break;
-      case TileSwizzle::Dim::Kind::Internal:
-        tileOffsets.push_back(zero);
-        tileSizes.push_back(builder.getIndexAttr(d.size()));
+        tileOffset = vtids[srcIdx];
         break;
       }
+      tileOffsets.push_back(tileOffset);
+      tileSizes.push_back(tileSize);
     }
+  }
+  
+  if (distributeAcrossSubgroups) {
+    assert(swizzle.expandShape()[0][0].kind() == TileSwizzle::Dim::Kind::CrossThread && "CrossThread subgroup dimension should be the first dimension in the first group");
+    tileOffsets[0] = sgParallel;
   }
 
   tileOffsets.assign(applyPermutation(tileOffsets, permutation));
   tileSizes.assign(applyPermutation(tileSizes, permutation));
-
   SmallVector<OpFoldResult> tileStrides(tileSizes.size(),
                                         builder.getIndexAttr(1));
-
   offsets.append(tileOffsets);
   sizes.append(tileSizes);
   strides.append(tileStrides);
