@@ -125,8 +125,8 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
         context, defaultCfg, target, partialDT,
         /*reductionTileSizes=*/{}, kScaledMMAOperandRhs);
     if (succeeded(lhsSwizzle) && succeeded(rhsSwizzle)) {
-      SmallVector<Attribute> promotionArray = {*lhsSwizzle, *rhsSwizzle};
-      GPU::appendPromotedOperandsList(context, attrs, {0, 1}, promotionArray);
+      SmallVector<Attribute> promotionArray = {*lhsSwizzle, *rhsSwizzle, defaultCfg, defaultCfg};
+      GPU::appendPromotedOperandsList(context, attrs, {0, 1, 2, 3}, promotionArray);
     } else {
       GPU::appendPromotedOperandsList(context, attrs, {0, 1});
     }
