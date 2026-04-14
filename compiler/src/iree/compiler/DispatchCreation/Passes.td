@@ -381,6 +381,12 @@ def HoistEncodingOpsPass : Pass<"iree-dispatch-creation-hoist-encoding-ops", "ml
     "IREE::Flow::FlowDialect",
     "IREE::Encoding::IREEEncodingDialect",
   ];
+  let options = [
+    Option<"hoistScalesOnly", "hoist-scales-only", "bool",
+    /*default=*/"false",
+    "Only hoist scale operand encodings (operand indices 2 and 3). "
+    "Data and accumulator encodings remain inside the dispatch.">,
+  ];
 }
 
 def HoistUniformScalarComputePass :

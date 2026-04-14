@@ -50,6 +50,13 @@ static llvm::cl::opt<bool> clExperimentalMultiUseEncodingFusion(
         "Enable encoding op fusion if the producer has more than one use"),
     llvm::cl::init(false));
 
+static llvm::cl::opt<bool> clHoistScalesOnly(
+    "iree-dispatch-creation-hoist-scales-only",
+    llvm::cl::desc("Only hoist scale operand encodings (operand indices 2 and "
+                   "3) out of dispatches. Data and accumulator encodings "
+                   "remain inside the dispatch."),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<DispatchCreation::EncodingOptions> clSetEncodingStrategy(
     "iree-dispatch-creation-set-encoding-strategy",
     llvm::cl::desc("Set the encoding strategy for operations."),
@@ -273,7 +280,10 @@ static void addDispatchRegionCreationPasses(OpPassManager &passManager,
     // op, so hoist them out of their current dispatch regions. Also, bubble
     // SetEncodingOps through special operations like bit-extending ops and
     // broadcasting ops.
-    passManager.addPass(DispatchCreation::createHoistEncodingOpsPass());
+    HoistEncodingOpsPassOptions hoistOpts;
+    hoistOpts.hoistScalesOnly = clHoistScalesOnly;
+    passManager.addPass(
+        DispatchCreation::createHoistEncodingOpsPass(hoistOpts));
   }
   FunctionLikeNest(passManager)
       .addPass([&]() {

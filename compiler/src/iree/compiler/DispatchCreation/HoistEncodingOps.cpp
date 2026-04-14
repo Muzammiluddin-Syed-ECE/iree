@@ -314,6 +314,16 @@ void HoistEncodingOpsPass::runOnOperation() {
     if (isa_and_nonnull<IREE::Encoding::PaddingAttr>(encoding)) {
       return;
     }
+    // When hoistScalesOnly is set, only hoist scale operands (indices 2 and 3).
+    if (hoistScalesOnly) {
+      if (auto encodingAttr =
+              dyn_cast_or_null<IREE::Encoding::EncodingAttr>(encoding)) {
+        int64_t operandIndex = encodingAttr.getOperandIndex().getInt();
+        if (operandIndex != 2 && operandIndex != 3) {
+          return;
+        }
+      }
+    }
 
     bool isHoistable = true;
     SetVector<Operation *> opsWithinDispatch, seen;
