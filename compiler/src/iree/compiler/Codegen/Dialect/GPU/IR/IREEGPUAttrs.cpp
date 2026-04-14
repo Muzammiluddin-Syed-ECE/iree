@@ -835,6 +835,10 @@ getSingleSubgroupLayout(IREE::Codegen::InnerTileDescAttrInterface mmaKind,
         smmaAttr.getIntrinsic(), operandIndex,
         operandIndex == kScaledMMAOperandAcc && smmaAttr.getColMajor());
   }
+  if (auto pdtsmma = dyn_cast<PartialDataTiledScaledMMAAttr>(mmaKind)) {
+    return IREE::GPU::getSingleSubgroupLayout(pdtsmma.getIntrinsic(),
+                                              operandIndex);
+  }
   assert(false && "unhandled MMA Interface type.");
   return {};
 }
@@ -2746,6 +2750,191 @@ DataTiledScaledMMAAttr::verifyIndexingMaps(ArrayRef<AffineMap> maps) const {
 
 SmallVector<SmallVector<utils::IteratorType>>
 DataTiledScaledMMAAttr::getOperandIteratorTypes() const {
+  return {{utils::IteratorType::parallel, utils::IteratorType::reduction,
+           utils::IteratorType::reduction},
+          {utils::IteratorType::reduction, utils::IteratorType::reduction,
+           utils::IteratorType::parallel},
+          {utils::IteratorType::parallel, utils::IteratorType::reduction},
+          {utils::IteratorType::reduction, utils::IteratorType::parallel},
+          {utils::IteratorType::parallel, utils::IteratorType::parallel}};
+}
+
+//===----------------------------------------------------------------------===//
+// PartialDataTiledScaledMMA Attributes
+//===----------------------------------------------------------------------===//
+
+TileSwizzle
+PartialDataTiledScaledMMAAttr::getTileSwizzle(unsigned operandIndex) const {
+  return getSwizzle(*this, operandIndex);
+}
+
+IREE::Codegen::TileMxNxKxKb
+PartialDataTiledScaledMMAAttr::getTileMNKKb() const {
+  return getScaledTileMNKKb(getIntrinsic(), getIntrinsicsM(), getSubgroupsM(),
+                            getIntrinsicsN(), getSubgroupsN(), getIntrinsicsK(),
+                            getSubgroupsK());
+}
+
+void PartialDataTiledScaledMMAAttr::getElementTypes(
+    SmallVectorImpl<Type> &result) const {
+  getScaledElementTypes(getContext(), getLhsElemType(), getRhsElemType(),
+                        getAccElemType(), result);
+}
+
+LogicalResult PartialDataTiledScaledMMAAttr::buildUnderlyingOperations(
+    OpBuilder &builder, Location loc, ValueRange inputs, ValueRange outputs,
+    SmallVectorImpl<Value> &results) const {
+  if (inputs.size() != 4 || outputs.size() != 1) {
+    return failure();
+  }
+  SmallVector<VectorType> regTypes;
+  getDistributedTileTypes(regTypes);
+  if (!llvm::equal(regTypes,
+                   llvm::concat<Type>(inputs.getTypes(), outputs.getTypes()))) {
+    return failure();
+  }
+  int64_t numOperands = getExpectedNumInputs() + getExpectedNumOutputs();
+  SmallVector<TileSwizzle, 5> swizzles;
+  for (int64_t i = 0; i < numOperands; ++i) {
+    swizzles.push_back(getSwizzle(*this, i));
+  }
+  return buildScaledMmaUnderlyingOperationsImpl(
+      builder, loc, inputs, outputs, results, swizzles, getIntrinsic(),
+      getIntrinsicsM(), getIntrinsicsN(), getIntrinsicsK());
+}
+
+void PartialDataTiledScaledMMAAttr::getDistributedTileTypes(
+    SmallVectorImpl<VectorType> &result) const {
+  return cast<DataTiledMMAInterfaceAttr>(Attribute(*this))
+      .getDistributedTileTypes(result);
+}
+
+LogicalResult PartialDataTiledScaledMMAAttr::populateOperandOffsetsSizesStrides(
+    OpBuilder &builder, Location loc, uint32_t operandIndex, Value laneId,
+    ArrayRef<int64_t> permutation, SmallVectorImpl<OpFoldResult> &offsets,
+    SmallVectorImpl<OpFoldResult> &sizes,
+    SmallVectorImpl<OpFoldResult> &strides) const {
+  TileSwizzle swizzle = getTileSwizzle(operandIndex);
+  bool isDataOperand = (operandIndex == kScaledMMAOperandLhs ||
+                        operandIndex == kScaledMMAOperandRhs);
+  if (!isDataOperand) {
+    return populateSwizzleBasedOffsetsSizesStrides(
+        builder, loc, swizzle, laneId, permutation, offsets, sizes, strides);
+  }
+
+  int64_t subgroupSize = getSubgroupSize();
+  Value laneIdVal = getValueOrCreateConstantIndexOp(builder, loc, laneId);
+  Value subgroupSizeVal =
+      arith::ConstantIndexOp::create(builder, loc, subgroupSize);
+  Value withinSubgroupId =
+      arith::RemUIOp::create(builder, loc, laneIdVal, subgroupSizeVal);
+  Value subgroupId =
+      arith::DivUIOp::create(builder, loc, laneIdVal, subgroupSizeVal);
+
+  int64_t sgN = getSubgroupsN();
+  Value sgNVal = arith::ConstantIndexOp::create(builder, loc, sgN);
+  Value subgroupM = arith::DivUIOp::create(builder, loc, subgroupId, sgNVal);
+  Value subgroupN = arith::RemUIOp::create(builder, loc, subgroupId, sgNVal);
+
+  MMASingleSubgroupLayout layout =
+      getSingleSubgroupLayout(getIntrinsic(), operandIndex);
+
+  // The swizzle construction rotates [K, Kb, N] -> [N, K, Kb] for RHS so
+  // the parallel dim is first. Apply the same rotation to the layout fields
+  // so vtids[srcIdx] lines up with the swizzle's expandShape source indices.
+  if (operandIndex == kScaledMMAOperandRhs) {
+    auto rotateRight = [](MutableArrayRef<int64_t> v) {
+      std::rotate(v.begin(), v.end() - 1, v.end());
+    };
+    rotateRight(layout.outer);
+    rotateRight(layout.thread);
+    rotateRight(layout.tstrides);
+    rotateRight(layout.element);
+  }
+
+  SmallVector<int64_t> vtidBasis;
+  SmallVector<size_t> dimToVtid;
+  if (failed(basisFromSizesStrides(layout.thread, layout.tstrides, vtidBasis,
+                                   dimToVtid))) {
+    return failure();
+  }
+  auto splitLaneId = affine::AffineDelinearizeIndexOp::create(
+      builder, loc, withinSubgroupId, vtidBasis, /*hasOuterBound=*/false);
+
+  size_t numSrcDims = layout.thread.size();
+  SmallVector<Value> vtids(numSrcDims);
+  for (size_t d = 0; d < numSrcDims; ++d) {
+    vtids[d] = splitLaneId.getResult(dimToVtid[d]);
+  }
+
+  Value sgParallel =
+      (operandIndex == kScaledMMAOperandLhs) ? subgroupM : subgroupN;
+
+  int64_t parallelSubgroups = (operandIndex == kScaledMMAOperandLhs)
+                                  ? getSubgroupsM()
+                                  : getSubgroupsN();
+  bool distributeAcrossSubgroups = (parallelSubgroups > 1);
+
+  OpFoldResult zero = builder.getIndexAttr(0);
+  OpFoldResult one = builder.getIndexAttr(1);
+  SmallVector<OpFoldResult> tileOffsets;
+  SmallVector<OpFoldResult> tileSizes;
+  for (auto [srcIdx, group] : llvm::enumerate(swizzle.expandShape())) {
+    for (TileSwizzle::Dim d : group) {
+      OpFoldResult tileOffset = zero;
+      OpFoldResult tileSize = one;
+      switch (d.kind()) {
+      case TileSwizzle::Dim::Kind::Internal:
+      case TileSwizzle::Dim::Kind::CrossIntrinsic:
+        tileSize = builder.getIndexAttr(d.size());
+        break;
+      case TileSwizzle::Dim::Kind::CrossThread:
+        tileOffset = vtids[srcIdx];
+        break;
+      }
+      tileOffsets.push_back(tileOffset);
+      tileSizes.push_back(tileSize);
+    }
+  }
+
+  if (distributeAcrossSubgroups) {
+    tileOffsets[0] = sgParallel;
+  }
+
+  tileOffsets.assign(applyPermutation(tileOffsets, permutation));
+  tileSizes.assign(applyPermutation(tileSizes, permutation));
+  SmallVector<OpFoldResult> tileStrides(tileSizes.size(),
+                                        builder.getIndexAttr(1));
+  offsets.append(tileOffsets);
+  sizes.append(tileSizes);
+  strides.append(tileStrides);
+  return success();
+}
+
+int64_t PartialDataTiledScaledMMAAttr::getExpectedNumInputs() const {
+  return 4;
+}
+
+int64_t PartialDataTiledScaledMMAAttr::getExpectedNumOutputs() const {
+  return 1;
+}
+
+int64_t PartialDataTiledScaledMMAAttr::getSubgroupSize() const {
+  return getIntrinsicSubgroupSize(getIntrinsic());
+}
+
+int64_t PartialDataTiledScaledMMAAttr::getFlatWorkgroupSize() const {
+  return getSubgroupSize() * getSubgroupsM() * getSubgroupsN() *
+         getSubgroupsK();
+}
+
+LogicalResult PartialDataTiledScaledMMAAttr::verifyIndexingMaps(
+    ArrayRef<AffineMap> maps) const {
+  return IREE::LinalgExt::inferScaledContractionDims(maps);
+}
+
+SmallVector<SmallVector<utils::IteratorType>>
+PartialDataTiledScaledMMAAttr::getOperandIteratorTypes() const {
   return {{utils::IteratorType::parallel, utils::IteratorType::reduction,
            utils::IteratorType::reduction},
           {utils::IteratorType::reduction, utils::IteratorType::reduction,
