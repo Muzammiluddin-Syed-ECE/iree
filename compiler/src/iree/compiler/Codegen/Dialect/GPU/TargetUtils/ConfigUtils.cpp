@@ -299,11 +299,11 @@ getContractionHeuristicSeeds(IREE::GPU::TargetAttr target,
 /// When `doCPromotion` is true, the accumulator uses shared memory. This can be
 /// due to padding requirements or because the operation has an existing
 /// accumulator that needs to be loaded from global memory (matmul_accumulate).
-static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
+std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
     IREE::GPU::TargetAttr target, GPUMatmulShapeType problem, Location loc,
     bool transposedLhs, bool transposedRhs, bool isGemm, bool scaled,
-    bool useDirectLoad, int64_t prefetchNumStages, bool mustBeAligned = true,
-    bool doCPromotion = false, int64_t splitReductionTripCnt = 0) {
+    bool useDirectLoad, int64_t prefetchNumStages, bool mustBeAligned,
+    bool doCPromotion, int64_t splitReductionTripCnt) {
   const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
   SmallVector<GPUIntrinsicType> intrinsics;
   if (scaled) {
@@ -730,16 +730,6 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
       cast<AffineDimExpr>(maps[1].getResults().back()).getPosition();
   bool couldNeedPadding = false;
 
-  // Helper to pad bounds to a preferred alignment.
-  auto maybePaddedBounds = [&](int64_t originalBound,
-                               int64_t alignment) -> int64_t {
-    int64_t remainder = originalBound % alignment;
-    if (remainder == 0) {
-      return originalBound;
-    }
-    couldNeedPadding = true;
-    return originalBound + alignment - remainder;
-  };
   // Since the TileAndFuse (I)GEMM pipeline can support padding we can align
   // the bounds of our problem so that we get favorable tile sizes.
   // Please see the document linked in
@@ -754,17 +744,15 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
                           bool paddingCanBeExpensive) -> SmallVector<int64_t> {
     return llvm::map_to_vector(dims, [&](int64_t dim) {
       if (ShapedType::isDynamic(bounds[dim]) || !canSupportUnaligned ||
-          paddingCanBeExpensive) {
+          paddingCanBeExpensive || bounds[dim] <= 32) {
         return bounds[dim];
       }
-      if (bounds[dim] > 128) {
-        return maybePaddedBounds(bounds[dim], 128);
+      int64_t alignment = bounds[dim] > 128 ? 128 : 32;
+      int64_t padded = padBoundForHeuristic(bounds[dim], alignment);
+      if (padded != bounds[dim]) {
+        couldNeedPadding = true;
       }
-      if (bounds[dim] > 32) {
-        return maybePaddedBounds(bounds[dim], 32);
-      }
-
-      return bounds[dim];
+      return padded;
     });
   };
 

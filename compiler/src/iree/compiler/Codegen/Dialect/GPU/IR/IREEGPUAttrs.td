@@ -318,9 +318,7 @@ class IREEGPU_DataTiledMMAInnerTileDescAttr<string mnemonic, list<Trait> traits 
     AttrDef<IREEGPU_Dialect, mnemonic, !listconcat(traits, [
       DeclareAttrInterfaceMethods<IREECodegen_InnerTileDescAttrInterface, [
         "getUndistributedTileTypes",
-        "getDistributedTileTypes",
         "getUndistributedTileDimExpansion",
-        "populateOperandOffsetsSizesStrides",
         "getDistributionMappingKind",
         "getDistributionWorkerCount",
         "getOperandIteratorTypes",
@@ -347,28 +345,11 @@ class IREEGPU_DataTiledMMAInnerTileDescAttr<string mnemonic, list<Trait> traits 
           .getUndistributedTileTypes(result);
     }
 
-    void $cppClass::getDistributedTileTypes(
-        SmallVectorImpl<VectorType>& result) const {
-      return cast<DataTiledMMAInterfaceAttr>(*this)
-          .getDistributedTileTypes(result);
-    }
-
     std::optional<::mlir::SmallVector<int64_t, 2>>
     $cppClass::getUndistributedTileDimExpansion(int64_t operandIndex,
                                                 int64_t logicalDim) const {
       return cast<DataTiledMMAInterfaceAttr>(*this)
           .getUndistributedTileDimExpansion(operandIndex, logicalDim);
-    }
-
-    LogicalResult $cppClass::populateOperandOffsetsSizesStrides(
-        OpBuilder &builder, Location loc, uint32_t operandIndex, Value laneId,
-        ArrayRef<int64_t> permutation, SmallVectorImpl<OpFoldResult> &offsets,
-        SmallVectorImpl<OpFoldResult> &sizes,
-        SmallVectorImpl<OpFoldResult> &strides) const {
-      return cast<DataTiledMMAInterfaceAttr>(*this)
-          .populateOperandOffsetsSizesStrides(builder, loc, operandIndex,
-                                              laneId, permutation, offsets,
-                                              sizes, strides);
     }
 
     Attribute $cppClass::getDistributionMappingKind() const {
@@ -393,6 +374,8 @@ def IREEGPU_DataTiledMMAAttr :
     "getExpectedNumInputs",
     "getExpectedNumOutputs",
     "verifyIndexingMaps",
+    "getDistributedTileTypes",
+    "populateOperandOffsetsSizesStrides",
     "getOperandIteratorTypes",
     "buildUnderlyingOperations",
   ]>
@@ -466,6 +449,8 @@ def IREEGPU_DataTiledScaledMMAAttr :
     "getExpectedNumInputs",
     "getExpectedNumOutputs",
     "verifyIndexingMaps",
+    "getDistributedTileTypes",
+    "populateOperandOffsetsSizesStrides",
     "buildUnderlyingOperations"
   ]>
 ]> {
