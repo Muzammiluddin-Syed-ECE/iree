@@ -34,12 +34,14 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/GPUTileSwizzleUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
+#include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/ConfigUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/Utils.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
 #include "iree/compiler/Dialect/LinalgExt/Utils/MatchUtils.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
@@ -51,6 +53,13 @@
 #include <numeric>
 
 #define DEBUG_TYPE "iree-codegen-materialize-encoding"
+
+static llvm::cl::opt<bool> clDtUseSeeds(
+    "iree-gpu-dt-use-seeds",
+    llvm::cl::desc("Use seed-based heuristic (deduceMMASchedule) instead of "
+                   "arithmetic-intensity heuristic for data-tiled MMA "
+                   "schedule selection."),
+    llvm::cl::init(false));
 
 namespace mlir::iree_compiler::IREE::GPU {
 
@@ -188,6 +197,65 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   }
   default:
     return {};
+  }
+
+  // When the seed-based heuristic is enabled, use deduceMMASchedule (via
+  // getMmaScheduleFromProblemAndTarget) instead of the arithmetic-intensity
+  // sweep below. This brings DT in line with the TileAndFuse config path.
+  if (clDtUseSeeds) {
+    FailureOr<IREE::Encoding::BxMxNxKxKb> matmulSizes =
+        getEncodingContractionLikeSizes(encoding);
+    if (failed(matmulSizes)) {
+      return {};
+    }
+    bool isScaled =
+        encoding.getOpType().getValue() ==
+        IREE::Encoding::EncodingOpType::scaled_matmul;
+    SmallVector<int64_t> kSizes = {matmulSizes->K};
+    if (isScaled) {
+      kSizes.push_back(matmulSizes->Kb);
+    }
+    GPUMatmulShapeType problem(
+        {matmulSizes->M}, {matmulSizes->N}, kSizes,
+        /*batch=*/{}, eTypes[0], eTypes[1],
+        isScaled ? eTypes[4] : eTypes[2],
+        isScaled ? eTypes[2] : Type{},
+        isScaled ? eTypes[3] : Type{});
+    padProblemForHeuristic(problem);
+    auto loc = UnknownLoc::get(ctx);
+    auto schedule = getMmaScheduleFromProblemAndTarget(
+        target, problem, loc,
+        /*transposedLhs=*/false, /*transposedRhs=*/true,
+        /*isGemm=*/true, /*scaled=*/isScaled,
+        /*useDirectLoad=*/false, /*prefetchNumStages=*/0);
+    if (!schedule) {
+      return {};
+    }
+    int64_t iM = schedule->mTileSizes[0];
+    int64_t iN = schedule->nTileSizes[0];
+    int64_t iK = schedule->kTileSizes[0];
+    int64_t sM = schedule->mSubgroupCounts[0];
+    int64_t sN = schedule->nSubgroupCounts[0];
+    int64_t sK = 1;
+    if (auto mma = dyn_cast<MMAAttr>(intrinsicAttr)) {
+      auto mmaInterleaveK =
+          DenseI64ArrayAttr::get(ctx, {kMMAOperandLhs, kMMAOperandRhs});
+      return DataTiledMMAAttr::get(
+          ctx, mma.getIntrinsic(), iM, sM, iN, sN, iK, sK,
+          /*operands_interleaving_intrinsics_m=*/{},
+          /*operands_interleaving_intrinsics_n=*/{},
+          /*operands_interleaving_intrinsics_k=*/mmaInterleaveK);
+    }
+    auto scaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
+    auto scaledMmaInterleaveK = DenseI64ArrayAttr::get(
+        ctx, {kScaledMMAOperandLhsScale, kScaledMMAOperandRhsScale});
+    return DataTiledScaledMMAAttr::get(
+        ctx, scaledMma.getIntrinsic(), scaledMma.getLhsElemType(),
+        scaledMma.getRhsElemType(), scaledMma.getAccElemType(),
+        iM, sM, iN, sN, iK, sK,
+        /*operands_interleaving_intrinsics_m=*/{},
+        /*operands_interleaving_intrinsics_n=*/{},
+        /*operands_interleaving_intrinsics_k=*/scaledMmaInterleaveK);
   }
 
   //
