@@ -835,6 +835,10 @@ getSingleSubgroupLayout(IREE::Codegen::InnerTileDescAttrInterface mmaKind,
         smmaAttr.getIntrinsic(), operandIndex,
         operandIndex == kScaledMMAOperandAcc && smmaAttr.getColMajor());
   }
+  if (auto dtsmma = dyn_cast<DataTiledScaledMMAAttr>(mmaKind)) {
+    return IREE::GPU::getSingleSubgroupLayout(dtsmma.getIntrinsic(),
+                                              operandIndex);
+  }
   assert(false && "unhandled MMA Interface type.");
   return {};
 }
@@ -1348,6 +1352,16 @@ LogicalResult MMAAttr::populateOperandOffsetsSizesStrides(
 int64_t DataTiledMMAAttr::getExpectedNumInputs() const { return 2; }
 
 int64_t DataTiledMMAAttr::getExpectedNumOutputs() const { return 1; }
+
+LogicalResult DataTiledMMAAttr::populateOperandOffsetsSizesStrides(
+    OpBuilder &builder, Location loc, uint32_t operandIndex, Value laneId,
+    ArrayRef<int64_t> permutation, SmallVectorImpl<OpFoldResult> &offsets,
+    SmallVectorImpl<OpFoldResult> &sizes,
+    SmallVectorImpl<OpFoldResult> &strides) const {
+  return cast<DataTiledMMAInterfaceAttr>(Attribute(*this))
+      .populateOperandOffsetsSizesStrides(builder, loc, operandIndex, laneId,
+                                          permutation, offsets, sizes, strides);
+}
 
 LogicalResult
 DataTiledMMAAttr::verifyIndexingMaps(ArrayRef<AffineMap> maps) const {
@@ -2638,7 +2652,6 @@ void DataTiledScaledMMAAttr::getElementTypes(
   result.push_back(Float8E8M0FNUType::get(getContext()));
   result.push_back(Float8E8M0FNUType::get(getContext()));
   result.push_back(getAccElemType());
-  return;
 }
 
 static Value createScaledMmaOp(OpBuilder &builder, Location loc,
@@ -2674,11 +2687,7 @@ static Value createScaledMmaOp(OpBuilder &builder, Location loc,
 LogicalResult DataTiledScaledMMAAttr::buildUnderlyingOperations(
     OpBuilder &builder, Location loc, ValueRange inputs, ValueRange outputs,
     SmallVectorImpl<Value> &results) const {
-  // Validation. Similar to MMAAttr::buildMmaOperation.
-  if (inputs.size() != 4) {
-    return failure();
-  }
-  if (outputs.size() != 1) {
+  if (inputs.size() != 4 || outputs.size() != 1) {
     return failure();
   }
   SmallVector<VectorType> regTypes;
@@ -2688,42 +2697,30 @@ LogicalResult DataTiledScaledMMAAttr::buildUnderlyingOperations(
     return failure();
   }
 
-  // Prepare Lhs/Rhs/Acc operand slices to feed the intrinsic.
-  const unsigned lhsIdx = 0;
-  const unsigned rhsIdx = 1;
-  const unsigned lhsScalesIdx = 2;
-  const unsigned rhsScalesIdx = 3;
-  const unsigned accIdx = 4;
-  TileSwizzle lhsSwizzle = getSwizzle(*this, lhsIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
+  TileSwizzle lhsSwizzle = getSwizzle(*this, 0);
+  TileSwizzle rhsSwizzle = getSwizzle(*this, 1);
+  TileSwizzle lhsScalesSwizzle = getSwizzle(*this, 2);
+  TileSwizzle rhsScalesSwizzle = getSwizzle(*this, 3);
+  TileSwizzle accSwizzle = getSwizzle(*this, 4);
+
   LDBG() << "    lhsSwizzle: " << lhsSwizzle;
   SmallVector<Value> intrinsicsLhs =
       distributeMmaFragmentToIntrinsics(builder, loc, inputs[0], lhsSwizzle);
 
-  TileSwizzle rhsSwizzle = getSwizzle(*this, rhsIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
   LDBG() << "    rhsSwizzle: " << rhsSwizzle;
   SmallVector<Value> intrinsicsRhs =
       distributeMmaFragmentToIntrinsics(builder, loc, inputs[1], rhsSwizzle);
 
-  TileSwizzle lhsScalesSwizzle = getSwizzle(*this, lhsScalesIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
   LDBG() << "    lhsScalesSwizzle: " << lhsScalesSwizzle;
   SmallVector<Value> intrinsicsLhsScales = distributeMmaFragmentToIntrinsics(
       builder, loc, inputs[2], lhsScalesSwizzle);
 
-  TileSwizzle rhsScalesSwizzle = getSwizzle(*this, rhsScalesIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
   LDBG() << "    rhsScalesSwizzle: " << rhsScalesSwizzle;
   SmallVector<Value> intrinsicsRhsScales = distributeMmaFragmentToIntrinsics(
       builder, loc, inputs[3], rhsScalesSwizzle);
 
-  TileSwizzle accSwizzle = getSwizzle(*this, accIdx);
-  LDBG() << "DataTiledScaledMMAAttr::buildMmaOperation";
   LDBG() << "    accSwizzle: " << accSwizzle;
 
-  // Distribute the accumulator into per-intrinsic slices; the reassembly
-  // conversion will be hoisted out of the reduction loop.
   auto distributeOp = IREE::Util::HoistableConversionOp::create(
       builder, loc, /*tag=*/kDataTiledAccDistribute,
       /*inverseTag=*/kDataTiledAccReassemble, ValueRange{outputs[0]},
@@ -2735,7 +2732,6 @@ LogicalResult DataTiledScaledMMAAttr::buildUnderlyingOperations(
   ScaledMMAIntrinsic intrinsic = getIntrinsic();
   auto intrinCType = cast<VectorType>(intrinsicsAcc.front().getType());
 
-  // Loop over the 3 unroll_{m,n,k} dimensions to create the intrinsics.
   for (int64_t mu = 0; mu < getIntrinsicsM(); ++mu) {
     for (int64_t nu = 0; nu < getIntrinsicsN(); ++nu) {
       for (int64_t ku = 0; ku < getIntrinsicsK(); ++ku) {
@@ -2750,7 +2746,6 @@ LogicalResult DataTiledScaledMMAAttr::buildUnderlyingOperations(
     }
   }
 
-  // Insert the results into the destination accumulator.
   SmallVector<int64_t> accCrossIntrinsicShape =
       Codegen::sliceSwizzledShape(accSwizzle, [](TileSwizzle::Dim dim) {
         return dim.kind() == TileSwizzle::Dim::Kind::CrossIntrinsic;
@@ -2794,6 +2789,29 @@ int64_t DataTiledScaledMMAAttr::getExpectedNumInputs() const { return 4; }
 
 int64_t DataTiledScaledMMAAttr::getExpectedNumOutputs() const { return 1; }
 
+LogicalResult DataTiledScaledMMAAttr::populateOperandOffsetsSizesStrides(
+    OpBuilder &builder, Location loc, uint32_t operandIndex, Value laneId,
+    ArrayRef<int64_t> permutation, SmallVectorImpl<OpFoldResult> &offsets,
+    SmallVectorImpl<OpFoldResult> &sizes,
+    SmallVectorImpl<OpFoldResult> &strides) const {
+  if (!isUnshuffledOperand(operandIndex)) {
+    return cast<DataTiledMMAInterfaceAttr>(Attribute(*this))
+        .populateOperandOffsetsSizesStrides(
+            builder, loc, operandIndex, laneId, permutation, offsets, sizes,
+            strides);
+  }
+  // For unshuffled operands, getTileSwizzle returns an identity permutation,
+  // but populateSwizzleBasedOffsetsSizesStrides uses the swizzle's permutation
+  // to order the delinearization basis — it must reflect the MMA tstrides. Use
+  // the non-identity-reset swizzle for both the delinearization and the output
+  // reordering so the two cancel out, yielding source-order offsets that match
+  // the identity layout.
+  TileSwizzle dtSwizzle = getDistributionSwizzle(*this, operandIndex);
+  return populateSwizzleBasedOffsetsSizesStrides(
+      builder, loc, dtSwizzle, laneId, dtSwizzle.permutation(), offsets, sizes,
+      strides);
+}
+
 int64_t DataTiledScaledMMAAttr::getSubgroupSize() const {
   return getIntrinsicSubgroupSize(getIntrinsic());
 }
@@ -2817,6 +2835,16 @@ DataTiledScaledMMAAttr::getOperandIteratorTypes() const {
           {utils::IteratorType::parallel, utils::IteratorType::reduction},
           {utils::IteratorType::reduction, utils::IteratorType::parallel},
           {utils::IteratorType::parallel, utils::IteratorType::parallel}};
+}
+
+bool DataTiledScaledMMAAttr::isUnshuffledOperand(unsigned idx) const {
+  auto attr = getUnshuffledOperands();
+  return attr && llvm::is_contained(attr.asArrayRef(), idx);
+}
+
+bool DataTiledScaledMMAAttr::hasUnshuffledOperands() const {
+  auto attr = getUnshuffledOperands();
+  return attr && !attr.empty();
 }
 
 //===----------------------------------------------------------------------===//

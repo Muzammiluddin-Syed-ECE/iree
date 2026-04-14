@@ -516,6 +516,7 @@ static GPUMMASchedule getOptimalMMASchedule(const GPUMatmulShapeType &problem,
                               mTotalTileToDistribute % splitFactor == 0;
   bool canNDistributeEvenly = nTotalTileToDistribute > splitFactor &&
                               nTotalTileToDistribute % splitFactor == 0;
+
   if (canMDistributeEvenly) {
     LDBG() << "Distributing seed evenly to M dim";
     distributeSqrtForDim(true, subgroupSqrt, tileSqrt, mTotalTileToDistribute,

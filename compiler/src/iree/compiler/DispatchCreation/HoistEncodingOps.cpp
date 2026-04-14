@@ -7,6 +7,7 @@
 #include <cassert>
 #include <queue>
 
+#include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingDialect.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 #include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
@@ -14,6 +15,8 @@
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/Flow/Transforms/RegionOpUtils.h"
+#include "iree/compiler/Dialect/HAL/Analysis/DeviceAnalysis.h"
+#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtDialect.h"
 #include "iree/compiler/Dialect/LinalgExt/Utils/Utils.h"
 #include "iree/compiler/Dialect/Util/Analysis/Constant/ConstExpr.h"
@@ -274,6 +277,28 @@ struct SinkUnsetEncodingOp : OpRewritePattern<IREE::Encoding::UnsetEncodingOp> {
 
 } // namespace
 
+/// Returns true if the target requires hoisting only scale operands for
+/// scaled matmul ops. Currently this is specific to gfx950 where data
+/// operands benefit from staying fused in the dispatch (identity permute
+/// loads) while scale operands benefit from pre-encoding via hoisting.
+static bool shouldHoistScalesOnly(ModuleOp moduleOp) {
+  IREE::HAL::DeviceAnalysis deviceAnalysis(moduleOp);
+  if (failed(deviceAnalysis.run())) {
+    return false;
+  }
+  SetVector<IREE::HAL::ExecutableTargetAttr> targets;
+  deviceAnalysis.gatherAllExecutableTargets(targets);
+  if (targets.size() != 1) {
+    return false;
+  }
+  IREE::GPU::TargetAttr gpuTarget =
+      getGPUTargetAttr(targets.front().getConfiguration());
+  if (!gpuTarget) {
+    return false;
+  }
+  return gpuTarget.getArch() == "gfx950";
+}
+
 /// Create dispatch.region Ops based on a fusion heuristic.
 void HoistEncodingOpsPass::runOnOperation() {
   MLIRContext *ctx = &getContext();
@@ -288,6 +313,8 @@ void HoistEncodingOpsPass::runOnOperation() {
                                    config))) {
     return signalPassFailure();
   }
+
+  bool hoistScalesOnly = shouldHoistScalesOnly(moduleOp);
 
   const auto &constExprs = getAnalysis<IREE::Util::ConstExprAnalysis>();
   IREE::Util::ConstExprHoistingPolicy policy(constExprs, /*threshold=*/0);
@@ -313,6 +340,21 @@ void HoistEncodingOpsPass::runOnOperation() {
     Attribute encoding = setEncodingOp.getResultType().getEncoding();
     if (isa_and_nonnull<IREE::Encoding::PaddingAttr>(encoding)) {
       return;
+    }
+    // For targets that require it (e.g., gfx950), only hoist scale operands
+    // (indices 2 and 3) for scaled_matmul ops. Data operands benefit from
+    // staying fused in the dispatch with identity-ordered global loads.
+    if (hoistScalesOnly) {
+      if (auto encodingAttr =
+              dyn_cast_or_null<IREE::Encoding::EncodingAttr>(encoding)) {
+        if (encodingAttr.getOpType().getValue() ==
+            IREE::Encoding::EncodingOpType::scaled_matmul) {
+          int64_t operandIndex = encodingAttr.getOperandIndex().getInt();
+          if (operandIndex != 2 && operandIndex != 3) {
+            return;
+          }
+        }
+      }
     }
 
     bool isHoistable = true;
