@@ -1490,9 +1490,11 @@ LogicalResult DataTiledMMAAttr::buildUnderlyingOperations(
       getThreadVectorType(builder.getContext(), intrinsic, kMMAOperandAcc);
 
   // Loop over the 3 unroll_{m,n,k} dimensions to create the intrinsics.
-  for (int mu = 0; mu < getIntrinsicsM(); ++mu) {
-    for (int nu = 0; nu < getIntrinsicsN(); ++nu) {
-      for (int ku = 0; ku < getIntrinsicsK(); ++ku) {
+  // K outermost so that scale/data operands for a given K-step are grouped,
+  // improving register reuse within each K-step.
+  for (int ku = 0; ku < getIntrinsicsK(); ++ku) {
+    for (int mu = 0; mu < getIntrinsicsM(); ++mu) {
+      for (int nu = 0; nu < getIntrinsicsN(); ++nu) {
         Value lhs = intrinsicsLhs[mu * getIntrinsicsK() + ku];
         Value rhs = intrinsicsRhs[nu * getIntrinsicsK() + ku];
         Value &acc = intrinsicsAcc[mu * getIntrinsicsN() + nu];
@@ -2635,9 +2637,9 @@ static LogicalResult buildScaledMmaUnderlyingOperationsImpl(
 
   auto intrinCType = cast<VectorType>(intrinsicsAcc.front().getType());
 
-  for (int64_t mu = 0; mu < intrinsicsM; ++mu) {
-    for (int64_t nu = 0; nu < intrinsicsN; ++nu) {
-      for (int64_t ku = 0; ku < intrinsicsK; ++ku) {
+  for (int64_t ku = 0; ku < intrinsicsK; ++ku) {
+    for (int64_t mu = 0; mu < intrinsicsM; ++mu) {
+      for (int64_t nu = 0; nu < intrinsicsN; ++nu) {
         Value lhs = intrinsicsLhs[mu * intrinsicsK + ku];
         Value rhs = intrinsicsRhs[nu * intrinsicsK + ku];
         Value lhsScales = intrinsicsLhsScales[mu * intrinsicsK + ku];
