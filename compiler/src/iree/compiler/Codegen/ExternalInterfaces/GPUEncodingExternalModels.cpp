@@ -233,7 +233,7 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
     }
     int64_t iM = schedule->mTileSizes[0];
     int64_t iN = schedule->nTileSizes[0];
-    int64_t iK = schedule->kTileSizes[0];
+    int64_t iK = 1;
     int64_t sM = schedule->mSubgroupCounts[0];
     int64_t sN = schedule->nSubgroupCounts[0];
     int64_t sK = 1;
@@ -279,7 +279,7 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // * Note that typically, the load bitwidth unrolling factor will be 1, so the
   // total K unrolling factor will just be the scales vector size.
   if (auto scaledMmaAttr = dyn_cast<ScaledMMAAttr>(intrinsicAttr)) {
-    intrinsicsK = std::lcm(intrinsicsK, scaledMmaAttr.getScalesVectorSize());
+    intrinsicsK = 1;
   }
 
   // The total amount of unrolling along the M and N dimensions is normally
