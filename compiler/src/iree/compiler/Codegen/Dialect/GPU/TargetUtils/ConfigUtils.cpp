@@ -117,15 +117,17 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
     // large to fit in shared memory, so they just want global memory and they
     // will take care of moving small chunks at a time into a shared memory
     // operand that will be created together with the ukernel op.
-    GPU::appendPromotedOperandsList(context, attrs, {0, 1});
+    SmallVector<int64_t> promotedOperands = {0, 1};
+    if (auto dataTiledMmaAttr = dyn_cast<DataTiledScaledMMAAttr>(multiMmaOp.getKind())) {
+      promotedOperands.append({2, 3});
+    }
+    GPU::appendPromotedOperandsList(context, attrs, promotedOperands);
   }
   DictionaryAttr configDict = b.getDictionaryAttr(attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
 
-  // By default, don't add any special padding or prefetching, since the
-  // data-tiled layout is already what we want.
   SmallVector<NamedAttribute, 1> pipelineAttrs;
-  int64_t prefetchStages = prefetchNumStages.value_or(0);
+  int64_t prefetchStages = prefetchNumStages.value_or(2);
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
       context, /*prefetchNumStages=*/prefetchStages,
       /*no_reduce_shared_memory_bank_conflicts=*/true,
