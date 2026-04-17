@@ -118,10 +118,30 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
     // will take care of moving small chunks at a time into a shared memory
     // operand that will be created together with the ukernel op.
     SmallVector<int64_t> promotedOperands = {0, 1};
-    if (auto dataTiledMmaAttr = dyn_cast<DataTiledScaledMMAAttr>(multiMmaOp.getKind())) {
+    SmallVector<Attribute> promotionTypes;
+    if (auto dtScaledMma =
+            dyn_cast<DataTiledScaledMMAAttr>(multiMmaOp.getKind())) {
       promotedOperands.append({2, 3});
+      auto defaultConfigAttr = DerivedThreadConfigAttr::get(context);
+      // Construct the underlying ScaledMMAAttr to compute XOR shuffle params,
+      // since getXorShuffleParamsForGfx950 only handles ScaledMMAAttr.
+      auto scaledMmaAttr = ScaledMMAAttr::get(
+          context, dtScaledMma.getIntrinsic(), dtScaledMma.getLhsElemType(),
+          dtScaledMma.getRhsElemType(), dtScaledMma.getAccElemType(),
+          /*col_major=*/false);
+      FailureOr<Attribute> lhsSwizzleAttr = getXorShuffleAttr(
+          context, defaultConfigAttr, target, scaledMmaAttr,
+          reductionTileSizes, kScaledMMAOperandLhs);
+      FailureOr<Attribute> rhsSwizzleAttr = getXorShuffleAttr(
+          context, defaultConfigAttr, target, scaledMmaAttr,
+          reductionTileSizes, kScaledMMAOperandRhs);
+      if (!failed(lhsSwizzleAttr) && !failed(rhsSwizzleAttr)) {
+        promotionTypes = {*lhsSwizzleAttr, *rhsSwizzleAttr, defaultConfigAttr,
+                          defaultConfigAttr};
+      }
     }
-    GPU::appendPromotedOperandsList(context, attrs, promotedOperands);
+    GPU::appendPromotedOperandsList(context, attrs, promotedOperands,
+                                    promotionTypes);
   }
   DictionaryAttr configDict = b.getDictionaryAttr(attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);

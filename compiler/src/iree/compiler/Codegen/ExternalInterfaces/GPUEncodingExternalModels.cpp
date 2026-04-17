@@ -225,18 +225,20 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
     auto loc = UnknownLoc::get(ctx);
     auto schedule = getMmaScheduleFromProblemAndTarget(
         target, problem, loc,
-        /*transposedLhs=*/false, /*transposedRhs=*/true,
+        /*transposedLhs=*/false, /*transposedRhs=*/false,
         /*isGemm=*/true, /*scaled=*/isScaled,
-        /*useDirectLoad=*/false, /*prefetchNumStages=*/0);
+        /*useDirectLoad=*/false, /*prefetchNumStages=*/2);
     if (!schedule) {
       return {};
     }
-    int64_t iM = schedule->mTileSizes[0];
-    int64_t iN = schedule->nTileSizes[0];
-    int64_t iK = 1;
-    int64_t sM = schedule->mSubgroupCounts[0];
-    int64_t sN = schedule->nSubgroupCounts[0];
+    int64_t iM = schedule->getTotalMTileSize();
+    int64_t iN = schedule->getTotalNTileSize();
+    int64_t sM = schedule->getTotalMSubgroupCount();
+    int64_t sN = schedule->getTotalNSubgroupCount();
+    int64_t iK = schedule->getTotalKTileSize();
     int64_t sK = 1;
+    llvm::errs() << "sM: " << sM << "\n";
+    llvm::errs() << "sN: " << sN << "\n";
     if (auto mma = dyn_cast<MMAAttr>(intrinsicAttr)) {
       auto mmaInterleaveK =
           DenseI64ArrayAttr::get(ctx, {kMMAOperandLhs, kMMAOperandRhs});
@@ -249,12 +251,16 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
     auto scaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
     auto scaledMmaInterleaveK = DenseI64ArrayAttr::get(
         ctx, {kScaledMMAOperandLhsScale, kScaledMMAOperandRhsScale});
+    auto scaledMmaInterleaveM =
+        DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandLhsScale});
+    auto scaledMmaInterleaveN =
+        DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandRhsScale});
     return DataTiledScaledMMAAttr::get(
         ctx, scaledMma.getIntrinsic(), scaledMma.getLhsElemType(),
         scaledMma.getRhsElemType(), scaledMma.getAccElemType(),
         iM, sM, iN, sN, iK, sK,
-        /*operands_interleaving_intrinsics_m=*/{},
-        /*operands_interleaving_intrinsics_n=*/{},
+        /*operands_interleaving_intrinsics_m=*/scaledMmaInterleaveM,
+        /*operands_interleaving_intrinsics_n=*/scaledMmaInterleaveN,
         /*operands_interleaving_intrinsics_k=*/scaledMmaInterleaveK);
   }
 
@@ -432,16 +438,23 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // the unrolled scales with each vector load, so we need to interleave at
   // the very last dimension for the scales. For the LHS/RHS, we load in blocks,
   // so we don't need to interleave.
+  // Additionally, interleave intrinsicsM for LHS scales and intrinsicsN for
+  // RHS scales so that per-thread scale elements are contiguous in LDS,
+  // enabling wider loads (ds_read_b32/b64) instead of byte-granular reads.
   auto scaledMmaInterleaveK = DenseI64ArrayAttr::get(
       ctx, {kScaledMMAOperandLhsScale, kScaledMMAOperandRhsScale});
+  auto scaledMmaInterleaveM =
+      DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandLhsScale});
+  auto scaledMmaInterleaveN =
+      DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandRhsScale});
   auto intrinsicScaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
   return DataTiledScaledMMAAttr::get(
       ctx, intrinsicScaledMma.getIntrinsic(),
       intrinsicScaledMma.getLhsElemType(), intrinsicScaledMma.getRhsElemType(),
       intrinsicScaledMma.getAccElemType(), intrinsicsM, subgroupsM, intrinsicsN,
       subgroupsN, intrinsicsK, subgroupsK,
-      /*operands_interleaving_intrinsics_m=*/{},
-      /*operands_interleaving_intrinsics_n=*/{},
+      /*operands_interleaving_intrinsics_m=*/scaledMmaInterleaveM,
+      /*operands_interleaving_intrinsics_n=*/scaledMmaInterleaveN,
       /*operands_interleaving_intrinsics_k=*/scaledMmaInterleaveK);
 }
 

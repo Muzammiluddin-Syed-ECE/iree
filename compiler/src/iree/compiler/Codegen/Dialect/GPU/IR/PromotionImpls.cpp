@@ -151,6 +151,28 @@ Value defaultPromotionImpl(OpBuilder &builder, OpOperand &operand,
 Value swizzlePromotionImpl(OpBuilder &builder, OpOperand &operand,
                            Attribute attr,
                            Codegen::SwizzleAttrInterface swizzle) {
+  // Handle transpose producers specially: insert the swizzle hint on the
+  // transpose's output tensor so the transpose itself becomes the cooperative
+  // copy into swizzled LDS. Without this, promotionImpl would take the
+  // LinalgOp shortcut and the swizzle would be silently dropped.
+  if (auto producer = operand.get().getDefiningOp<TilingInterface>()) {
+    auto generic = dyn_cast<linalg::GenericOp>(producer.getOperation());
+    if (generic && linalg::isaTransposeOpInterface(generic)) {
+      Value output = generic.getDpsInits()[0];
+      auto emptyOp = output.getDefiningOp<tensor::EmptyOp>();
+      auto tensorType = dyn_cast<RankedTensorType>(output.getType());
+      if (emptyOp && tensorType && tensorType.hasStaticShape()) {
+        OpBuilder::InsertionGuard g(builder);
+        builder.setInsertionPointAfter(emptyOp);
+        Value swizzled = IREE::Codegen::SwizzleHintOp::create(
+            builder, emptyOp->getLoc(), output, swizzle);
+        generic.getDpsInitsMutable()[0].set(swizzled);
+        setLoweringConfig(producer, attr);
+        return operand.get();
+      }
+    }
+  }
+
   std::optional<Value> promotedValue = promotionImpl(builder, operand, attr);
   if (promotedValue.has_value()) {
     return promotedValue.value();
