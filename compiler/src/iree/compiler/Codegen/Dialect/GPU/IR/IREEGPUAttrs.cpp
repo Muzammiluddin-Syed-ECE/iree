@@ -2504,13 +2504,7 @@ ScaledMMAAttr::getOperandIteratorTypes() const {
 
 TileSwizzle
 DataTiledScaledMMAAttr::getTileSwizzle(unsigned operandIndex) const {
-  TileSwizzle swizzle = getSwizzle(*this, operandIndex);
-  if (operandIndex == kScaledMMAOperandLhs ||
-      operandIndex == kScaledMMAOperandRhs) {
-    auto &perm = swizzle.permutation();
-    std::iota(perm.begin(), perm.end(), 0);
-  }
-  return swizzle;
+  return getSwizzle(*this, operandIndex);
 }
 
 static std::tuple<int64_t, int64_t, int64_t, int64_t>
