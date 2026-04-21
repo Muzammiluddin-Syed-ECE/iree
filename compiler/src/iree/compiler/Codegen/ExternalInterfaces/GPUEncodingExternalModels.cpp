@@ -54,7 +54,7 @@
 
 #define DEBUG_TYPE "iree-codegen-materialize-encoding"
 
-static llvm::cl::opt<bool> clPartialDTScaledMMA(
+llvm::cl::opt<bool> clPartialDTScaledMMA(
     "iree-gpu-partial-dt-scaled-mma",
     llvm::cl::desc(
         "Use unshuffled data operands for scaled matmuls: data operands "
