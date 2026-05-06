@@ -215,57 +215,48 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
     intrinsicsK = 2;
   }
 
-  // The total amount of unrolling along the M and N dimensions is normally
-  // limited only by the number of available registers, since larger M and N
-  // yields higher arithmetic intensity. Here, we do not yet distinguish between
-  // plain unrolling (more instructions on each thread) and
-  // unrolling-to-subgroups (more threads), since expanding to more subgroups
-  // correspondingly divides the available register space between this many
-  // subgroups, making it cancel out of the equation here.
+  // Joint search over (subgroupsM, subgroupsN, intrinsicsM, intrinsicsN).
   //
-  // We need to find the optimal pair (totalUnrollM, totalUnrollN) by
-  // enumerating feasible (tm, tn) candidates. For each candidate, the
-  // following two constraints are enforced:
-  // 1. The A, B and C tiles must fit in VGPR space.
-  //     A-tile + B-tile + C-tile <= wgp.getVgprSpaceBits()
-  // 2. The A, B tiles must fit in shared memory.
-  //     A-tile + B-tile <= wgp.getMaxWorkgroupMemoryBytes() * 8
-  // A-tile: tm * intrinsicsK * intrinsicSizeBitsLHS
-  // B-tile: tn * intrinsicsK * intrinsicSizeBitsRHS
-  // C-tile: tm * tn * intrinsicSizeBitsACC
+  // For each candidate subgroup configuration (sm, sn), we compute the
+  // per-wave VGPR budget and find the maximum feasible per-wave unrolling
+  // (im, in). This allows the search to explore configurations with more
+  // subgroups (higher occupancy) that trade per-wave unrolling for better
+  // latency hiding.
   //
-  // The optimization goal is to maximize arithmetic intensity (tm * tn) / (tm +
-  // tn).
+  // Constraints enforced per candidate:
+  // 1. Per-wave VGPR: im*iK*L + in*iK*R + im*in*A <= vgprSpace/(sm*sn)
+  // 2. Per-workgroup LDS: sm*im*iK*L + sn*in*iK*R <= maxLDS
+  // 3. Padding caps: sm*im <= maxTotalM, sn*in <= maxTotalN
+  // 4. Workgroup granularity: (sm*im)*(sn*in) <= maxTotalMN
+  // 5. All values are powers of 2.
   //
-  // We also self-impose the constraint that tm and tn are powers of 2 to
-  // avoid prematurely entering excessing fine-tuning of unrolling factors.
-  int64_t totalUnrollM = 1;
-  int64_t totalUnrollN = 1;
+  // Scoring: maximize total workgroup arithmetic intensity
+  //   (tm * tn) / (tm + tn)  where tm = sm*im, tn = sn*in
+  // With tiebreaker: prefer more subgroups (better occupancy).
+  int64_t subgroupsM = 1;
+  int64_t subgroupsN = 1;
+  int64_t intrinsicsM = 1;
+  int64_t intrinsicsN = 1;
   auto computeArithmeticIntensity = [&](int64_t tm, int64_t tn) -> double {
     return double(tm * tn) / double(tm + tn);
   };
-  double bestArithmeticIntensity =
-      computeArithmeticIntensity(totalUnrollM, totalUnrollN);
-  // Upper bounds of tm and tn are decided by the matrix and intrinsic sizes.
+  double bestScore = 0;
+  int64_t bestSubgroups = 0;
+
   int64_t maxTotalUnrollM = INT64_MAX;
   int64_t maxTotalUnrollN = INT64_MAX;
-  // Upper bound of tm * tn are decided by the workgroup count of the chip and
-  // the intrinsic sizes.
   int64_t maxTotalUnrollMN = INT64_MAX;
   FailureOr<IREE::Encoding::BxMxNxKxKb> matmulSizes =
       getEncodingContractionLikeSizes(encoding);
   if (succeeded(matmulSizes)) {
     if (!ShapedType::isDynamic(matmulSizes->M)) {
-      // Cap maxTotalUnrollM to avoid excessive padding.
       maxTotalUnrollM = llvm::divideCeil(matmulSizes->M, intrinsicMSize);
     }
     if (!ShapedType::isDynamic(matmulSizes->N)) {
-      // Cap maxTotalUnrollN to avoid excessive padding.
       maxTotalUnrollN = llvm::divideCeil(matmulSizes->N, intrinsicNSize);
     }
     if (!ShapedType::isDynamic(matmulSizes->M) &&
         !ShapedType::isDynamic(matmulSizes->N)) {
-      // Cap maxTotalUnrollMN to avoid underutilizing the workgroups available.
       IREE::GPU::TargetChipAttr chip = target.getChip();
       int64_t numWGPs = chip ? chip.getWgpCount() : 512;
       maxTotalUnrollMN =
@@ -273,74 +264,93 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
                            numWGPs * intrinsicMSize * intrinsicNSize);
     }
   }
-  // Iterate over possible tm.
-  for (int64_t tm = 1; tm <= maxTotalUnrollM; tm <<= 1) {
-    // Compute the maximum feasible tn for this tm.
-    int64_t maxFeasibleTnVgpr =
-        (*wgp.getVgprSpaceBits() - tm * intrinsicsK * intrinsicSizeBitsLHS) /
-        (intrinsicsK * intrinsicSizeBitsRHS + tm * intrinsicSizeBitsACC);
-    int64_t maxFeasibleTnSharedMem = (wgp.getMaxWorkgroupMemoryBytes() * 8 -
-                                      tm * intrinsicsK * intrinsicSizeBitsLHS) /
-                                     (intrinsicsK * intrinsicSizeBitsRHS);
-    int64_t tn = std::min(maxFeasibleTnVgpr, maxFeasibleTnSharedMem);
-    // Clamp tn to maxTotalUnrollN.
-    tn = std::min(tn, maxTotalUnrollN);
-    // Clamp tn to maxTotalUnrollMN / tm.
-    tn = std::min(tn, maxTotalUnrollMN / tm);
-    // No feasible tn for this tm. Stop the enumeration.
-    if (tn <= 0) {
-      break;
-    }
-    // Round tn down to nearest power of two.
-    tn = 1 << (int64_t)std::floor(std::log2(tn));
-    // Maximize arithmetic intensity (tm * tn) / (tm + tn).
-    double currentArithmeticIntensity = computeArithmeticIntensity(tm, tn);
-    if (currentArithmeticIntensity > bestArithmeticIntensity) {
-      totalUnrollM = tm;
-      totalUnrollN = tn;
-      bestArithmeticIntensity = currentArithmeticIntensity;
+
+  int64_t simdsPerWgp = *wgp.getSimdsPerWgp();
+  int64_t maxSubgroups = simdsPerWgp * 4;
+  int64_t vgprSpaceBits = *wgp.getVgprSpaceBits();
+  int64_t maxLDSBits = wgp.getMaxWorkgroupMemoryBytes() * 8;
+
+  llvm::errs() << "=== Joint search params: vgprSpaceBits=" << vgprSpaceBits
+               << " maxLDSBits=" << maxLDSBits << " iK=" << intrinsicsK
+               << " L=" << intrinsicSizeBitsLHS << " R=" << intrinsicSizeBitsRHS
+               << " A=" << intrinsicSizeBitsACC
+               << " maxSubgroups=" << maxSubgroups
+               << " maxTotalM=" << maxTotalUnrollM
+               << " maxTotalN=" << maxTotalUnrollN
+               << " maxTotalMN=" << maxTotalUnrollMN << "\n";
+
+  for (int64_t sm = 1; sm <= maxSubgroups; sm <<= 1) {
+    for (int64_t sn = 1; sn <= maxSubgroups / sm; sn <<= 1) {
+      int64_t numWaves = sm * sn;
+      int64_t wavesPerSimd = std::max((int64_t)1, numWaves / simdsPerWgp);
+      int64_t perWaveVgpr = vgprSpaceBits / wavesPerSimd;
+
+      for (int64_t im = 1; ; im <<= 1) {
+        if (sm * im > maxTotalUnrollM) {
+          llvm::errs() << "  [sm=" << sm << " sn=" << sn << " im=" << im
+                       << "] BREAK: sm*im=" << (sm*im)
+                       << " > maxTotalM=" << maxTotalUnrollM << "\n";
+          break;
+        }
+        int64_t aTilePerWave = im * intrinsicsK * intrinsicSizeBitsLHS;
+        if (aTilePerWave >= perWaveVgpr) {
+          llvm::errs() << "  [sm=" << sm << " sn=" << sn << " im=" << im
+                       << "] BREAK: aTile=" << aTilePerWave
+                       << " >= perWaveVgpr=" << perWaveVgpr << "\n";
+          break;
+        }
+        // Max in from per-wave VGPR constraint.
+        int64_t maxInVgpr =
+            (perWaveVgpr - aTilePerWave) /
+            (intrinsicsK * intrinsicSizeBitsRHS + im * intrinsicSizeBitsACC);
+        // Max in from per-workgroup LDS constraint.
+        int64_t lhsLDS = sm * im * intrinsicsK * intrinsicSizeBitsLHS;
+        int64_t maxInLDS = (lhsLDS < maxLDSBits)
+            ? (maxLDSBits - lhsLDS) / (sn * intrinsicsK * intrinsicSizeBitsRHS)
+            : 0;
+        int64_t inRaw = std::min(maxInVgpr, maxInLDS);
+        int64_t inCapped = std::min(inRaw, maxTotalUnrollN / sn);
+        if (sm * im > 0 && sn > 0) {
+          inCapped = std::min(inCapped, maxTotalUnrollMN / (sm * im * sn));
+        }
+        if (inCapped <= 0) {
+          llvm::errs() << "  [sm=" << sm << " sn=" << sn << " im=" << im
+                       << "] SKIP: in<=0 (maxInVgpr=" << maxInVgpr
+                       << " maxInLDS=" << maxInLDS << ")\n";
+          continue;
+        }
+        int64_t in = 1LL << (int64_t)std::floor(std::log2((double)inCapped));
+
+        int64_t totalM = sm * im;
+        int64_t totalN = sn * in;
+        double score = computeArithmeticIntensity(totalM, totalN);
+        bool accepted = score > bestScore ||
+            (score == bestScore && numWaves > bestSubgroups);
+        llvm::errs() << "  [sm=" << sm << " sn=" << sn << " im=" << im
+                     << " in=" << in << "] totalM=" << totalM
+                     << " totalN=" << totalN << " MN=" << (totalM * totalN)
+                     << " score=" << score
+                     << " (maxInVgpr=" << maxInVgpr
+                     << " maxInLDS=" << maxInLDS << ")"
+                     << (accepted ? " ** ACCEPTED **" : "") << "\n";
+        if (accepted) {
+          subgroupsM = sm;
+          subgroupsN = sn;
+          intrinsicsM = im;
+          intrinsicsN = in;
+          bestScore = score;
+          bestSubgroups = numWaves;
+        }
+      }
     }
   }
 
-  //
-  // Step 3: Split `totalUnrollM` and `totalUnrollN` into plain unrolling (more
-  // instructions on each thread) and unrolling-to-subgroups (more threads).
-  //
-  // Unrolling-to-subgroups doesn't change the overall tile
-  // size, as it increases the number of subgroups but correspondingly decreases
-  // the number of registers available to each subgroups. In other words, the
-  // overall tile size determined above only needed to be concerned with the
-  // overall number of registers, not with how they are split between subgroups.
-  //
-  // The goal is still to maximize arithmetic intensity, but now we need to
-  // optimize `intrinsicsM(N)` instead of `totalUnrollM(N)`.
-  int64_t subgroupsM = 1;
-  int64_t subgroupsN = 1;
-  int64_t intrinsicsM = 1;
-  int64_t intrinsicsN = 1;
-  bestArithmeticIntensity =
-      computeArithmeticIntensity(intrinsicsM, intrinsicsN);
-  int64_t simdsPerWgp = *wgp.getSimdsPerWgp();
-  // Enumerate possible unrolling-to-subgroups on M dimension.
-  for (int64_t sm = 1; sm <= std::min(simdsPerWgp, totalUnrollM); sm <<= 1) {
-    // Calculate the unrolling-to-subgroups on N dimension, given the current
-    // sm.
-    int64_t sn = std::min(simdsPerWgp / sm, totalUnrollN);
-    // Round sn down to nearest power of two.
-    sn = 1 << (int64_t)std::floor(std::log2(sn));
-    // Calculate the plain (intrinsic) unrolling factors on M and N dimensions.
-    int64_t im = totalUnrollM / sm;
-    int64_t in = totalUnrollN / sn;
-    // Maximize arithmetic intensity (im * in) / (im + in).
-    double currentArithmeticIntensity = computeArithmeticIntensity(im, in);
-    if (currentArithmeticIntensity > bestArithmeticIntensity) {
-      subgroupsM = sm;
-      subgroupsN = sn;
-      intrinsicsM = im;
-      intrinsicsN = in;
-      bestArithmeticIntensity = currentArithmeticIntensity;
-    }
-  }
+  llvm::errs() << "chooseDataTiledMMAAttr: sM=" << subgroupsM
+               << " sN=" << subgroupsN << " iM=" << intrinsicsM
+               << " iN=" << intrinsicsN << " iK=" << intrinsicsK
+               << " totalM=" << (subgroupsM * intrinsicsM)
+               << " totalN=" << (subgroupsN * intrinsicsN)
+               << " waves=" << (subgroupsM * subgroupsN) << "\n";
 
   // We currently never generate subgroupsK != 1, as subgroupsK requires
   // specific partial-accumulator-reduction in the kernel, currently only done
