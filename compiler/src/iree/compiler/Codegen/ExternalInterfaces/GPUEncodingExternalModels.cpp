@@ -212,6 +212,7 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // total K unrolling factor will just be the scales vector size.
   if (auto scaledMmaAttr = dyn_cast<ScaledMMAAttr>(intrinsicAttr)) {
     intrinsicsK = std::lcm(intrinsicsK, scaledMmaAttr.getScalesVectorSize());
+    // intrinsicsK = 2;
   }
 
   // The total amount of unrolling along the M and N dimensions is normally
@@ -300,7 +301,8 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
       bestArithmeticIntensity = currentArithmeticIntensity;
     }
   }
-
+  llvm::errs() << "totalUnrollM: " << totalUnrollM << "\n";
+  llvm::errs() << "totalUnrollN: " << totalUnrollN << "\n";
   //
   // Step 3: Split `totalUnrollM` and `totalUnrollN` into plain unrolling (more
   // instructions on each thread) and unrolling-to-subgroups (more threads).
@@ -364,6 +366,15 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // the unrolled scales with each vector load, so we need to interleave at
   // the very last dimension for the scales. For the LHS/RHS, we load in blocks,
   // so we don't need to interleave.
+  // subgroupsM = 2;
+  // subgroupsN = 8;
+  // intrinsicsM = 8;
+  // intrinsicsN = 2;
+  // intrinsicsK = 1;
+  auto scaledMmaInterleaveM = DenseI64ArrayAttr::get(
+    ctx, {kScaledMMAOperandLhsScale});
+  auto scaledMmaInterleaveN = DenseI64ArrayAttr::get(
+    ctx, {kScaledMMAOperandRhsScale});
   auto scaledMmaInterleaveK = DenseI64ArrayAttr::get(
       ctx, {kScaledMMAOperandLhsScale, kScaledMMAOperandRhsScale});
   auto intrinsicScaledMma = cast<ScaledMMAAttr>(intrinsicAttr);
@@ -372,8 +383,8 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
       intrinsicScaledMma.getLhsElemType(), intrinsicScaledMma.getRhsElemType(),
       intrinsicScaledMma.getAccElemType(), intrinsicsM, subgroupsM, intrinsicsN,
       subgroupsN, intrinsicsK, subgroupsK,
-      /*operands_interleaving_intrinsics_m=*/{},
-      /*operands_interleaving_intrinsics_n=*/{},
+      /*operands_interleaving_intrinsics_m=*/scaledMmaInterleaveM,
+      /*operands_interleaving_intrinsics_n=*/scaledMmaInterleaveN,
       /*operands_interleaving_intrinsics_k=*/scaledMmaInterleaveK,
       /*unswizzled_operands=*/{});
 }
