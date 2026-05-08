@@ -212,9 +212,10 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // factor. Instead we interleave the M and N dimensions into the scale
   // operands to achieve the same contiguous loads without sacrificing
   // arithmetic intensity.
-  int64_t maxWavesPerSimd = 2;
+  int64_t maxWavesPerSimd = 1;
   if (auto scaledMmaAttr = dyn_cast<ScaledMMAAttr>(intrinsicAttr)) {
     intrinsicsK = 2;
+    maxWavesPerSimd = 2;
   }
 
   auto computeArithmeticIntensity = [&](int64_t tm, int64_t tn) -> double {
@@ -271,10 +272,15 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   int64_t bestWaves = 0;
   // TODO: For the same arithmetic intensity, distributing more intrinsics or
   // subgroups along M vs N yields different performance despite the metric being
-  // symmetric. The root cause is unclear, likely related to memory access
+  // symmetric. The root cause is unclear — likely related to memory access
   // patterns, LDS layout, or how M/N interleaving interacts with coalescing.
   for (int64_t wps = 1; wps <= maxWavesPerSimd; ++wps) {
-    int64_t perWaveVgpr = vgprSpaceBits / wps;
+    // Safety margin: halve the architectural VGPR space to account for
+    // register pressure beyond tile data (e.g. intermediate results, shared
+    // memory indexing, predicate masks) that the tile-only model does not
+    // capture. Without this margin the heuristic accepts tiles that cause
+    // register spilling in practice.
+    int64_t perWaveVgpr = vgprSpaceBits / 2;
     int64_t maxSubgroups = simdsPerWgp * wps;
     for (int64_t sm = 1; sm <= maxSubgroups; sm <<= 1) {
       for (int64_t sn = 1; sn <= maxSubgroups / sm; sn <<= 1) {
@@ -336,7 +342,7 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   }
   // For scaled matmuls, interleaving happens because we want to load all
   // the unrolled scales with each vector load, so we need to interleave at
-  // the very last dimension for the scales. For the LHS/RHS, we load in blocks,
+  // all available dimensions for the scales. For the LHS/RHS, we load in blocks,
   // so we don't need to interleave.
   auto scaledMmaInterleaveM = DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandLhsScale});
   auto scaledMmaInterleaveN = DenseI64ArrayAttr::get(ctx, {kScaledMMAOperandRhsScale});
