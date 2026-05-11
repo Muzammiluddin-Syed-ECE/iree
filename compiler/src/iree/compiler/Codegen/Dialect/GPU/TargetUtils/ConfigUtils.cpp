@@ -103,7 +103,6 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
       {"workgroup", b.getI64ArrayAttr(workgroupTileSizes)},
       {"reduction", b.getI64ArrayAttr(reductionTileSizes)},
   };
-  int64_t defaultPrefetchStages = 0;
   if (ukernelConfig) {
     op->setAttr(kUkernelAttrName, ukernelConfig);
   } else {
@@ -116,17 +115,16 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
     bool isScaled = isa<DataTiledScaledMMAAttr>(dataTiledMmaAttr);
     if (isScaled) {
       promotionList.append({2, 3});
-      defaultPrefetchStages = 2;
     }
     GPU::appendPromotedOperandsList(context, attrs, promotionList);
   }
   DictionaryAttr configDict = b.getDictionaryAttr(attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
 
-  // By default, don't add any special padding or prefetching, since the
-  // data-tiled layout is already what we want, unless for scaled matmuls.
+  // By default, don't add any special padding since the data-tiled layout is
+  // already what we want. Default to 2 prefetch stages when not specified.
   SmallVector<NamedAttribute, 1> pipelineAttrs;
-  int64_t prefetchStages = prefetchNumStages.value_or(defaultPrefetchStages);
+  int64_t prefetchStages = prefetchNumStages.value_or(2);
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
       context, /*prefetchNumStages=*/prefetchStages,
       /*no_reduce_shared_memory_bank_conflicts=*/true,
