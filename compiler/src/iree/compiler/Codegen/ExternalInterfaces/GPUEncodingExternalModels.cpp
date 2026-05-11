@@ -269,11 +269,9 @@ chooseDataTiledMMAAttr(TypeRange eTypes, TargetAttr target,
   // subgroups along M vs N yields different performance despite the metric being
   // symmetric. Investigate why, likely related to memory access patterns.
   for (int64_t wps = 1; wps <= maxWavesPerSimd; ++wps) {
-    // Safety margin: halve the architectural VGPR space to account for
-    // register pressure beyond tile data (e.g. intermediate results, shared
-    // memory indexing, predicate masks) that the tile-only model does not
-    // capture. Without this margin the heuristic accepts tiles that cause
-    // register spilling in practice.
+    // Emprically, for 1 wave per simd, assuming we can use all available VGPRs
+    // for tile data leads to register spilling, so we impose a safety margin
+    // by dividing available VGPRs by 2 even for 1 wave per simd.
     int64_t perWaveVgpr = vgprSpaceBits / 2;
     int64_t maxSubgroups = simdsPerWgp * wps;
     for (int64_t sm = 1; sm <= maxSubgroups; sm <<= 1) {
